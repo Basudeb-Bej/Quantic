@@ -2254,29 +2254,20 @@ const emptyBundle = (query, status) => ({
 	status,
 });
 
-// `options` is optional and inert unless a caller passes it, so existing
-// call sites (`searchWebDetailed(query)`) behave exactly as before.
-/* ------------------------------------------------------------------------- *
- * Clickable links: resolve + verify every source URL before the model (and the
- * user) ever sees it.
- *
- * Google News RSS items link to opaque "news.google.com/rss/articles/<id>"
- * redirects that often 404 outside a perfectly-warmed browser session. Each
- * source goes through, in order:
- *   1. decode the Google News link to the publisher's real article URL
- *   2. GET it - a 404/410 means dead
- *   3. dead / undecodable -> the publisher's own site (right website, can't 404)
- *   4. nothing trustworthy -> no URL at all (the badge renders unlinked)
- * ------------------------------------------------------------------------- */
-
 const LINK_VERIFY_ENABLED = process.env.WEB_LINK_VERIFY !== "0";
 const LINK_CHECK_TIMEOUT_MS = Number(process.env.WEB_LINK_CHECK_TIMEOUT_MS || 3500);
-const LINK_RESOLVE_BUDGET_MS = Number(process.env.WEB_LINK_RESOLVE_BUDGET_MS || 6500);
+const GOOGLE_DECODE_TIMEOUT_MS = Number(process.env.WEB_LINK_DECODE_TIMEOUT_MS || 5000);
+const LINK_RESOLVE_BUDGET_MS = Number(process.env.WEB_LINK_RESOLVE_BUDGET_MS || 9000);
 const LINK_RESOLVE_CONCURRENCY = 6;
 const LINK_CACHE_TTL_MS = 30 * 60 * 1000;
+const LINK_FAIL_CACHE_TTL_MS = 2 * 60 * 1000;
 const LINK_CACHE_MAX = 500;
 const DEAD_LINK_STATUSES = new Set([404, 410]);
 const GOOGLE_NEWS_BATCH_ENDPOINT = "https://news.google.com/_/DotsSplashUi/data/batchexecute";
+
+// Best effort: tells Google this client already accepted its consent screen, so a
+// server in the EU is not answered with a consent page instead of the article page.
+const GOOGLE_CONSENT_COOKIE = "CONSENT=YES+cb; SOCS=CAI";
 
 const linkCache = new Map();
 
@@ -2364,20 +2355,47 @@ const parseGoogleNewsBatchResponse = (text) => {
 };
 
 const decodeGoogleNewsViaNetwork = async (id) => {
-	const pageResponse = await fetchWithTimeout(`https://news.google.com/rss/articles/${id}?hl=en-US&gl=US&ceid=US:en`, {
-		headers: { "User-Agent": BROWSER_USER_AGENT, "Accept-Language": "en-US,en;q=0.9" },
-		redirect: "follow",
-	}, LINK_CHECK_TIMEOUT_MS, null);
+	const pageHeaders = {
+		"User-Agent": BROWSER_USER_AGENT,
+		"Accept-Language": "en-US,en;q=0.9",
+		Cookie: GOOGLE_CONSENT_COOKIE,
+	};
 
-	if (!pageResponse.ok) {
-		return "";
+	// Google serves the signed page under either path depending on the link type.
+	const pageUrls = [
+		`https://news.google.com/articles/${id}?hl=en-US&gl=US&ceid=US:en`,
+		`https://news.google.com/rss/articles/${id}?hl=en-US&gl=US&ceid=US:en`,
+	];
+
+	let signature = "";
+	let timestamp = "";
+	let note = "";
+
+	for (const pageUrl of pageUrls) {
+		try {
+			const pageResponse = await fetchWithTimeout(pageUrl, { headers: pageHeaders, redirect: "follow" }, GOOGLE_DECODE_TIMEOUT_MS, null);
+
+			if (!pageResponse.ok) {
+				note = `article page answered ${pageResponse.status}`;
+				continue;
+			}
+
+			const html = await readBodyCapped(pageResponse, PREVIEW_MAX_BYTES);
+			signature = html.match(/data-n-a-sg="([^"]+)"/)?.[1] || "";
+			timestamp = html.match(/data-n-a-ts="([^"]+)"/)?.[1] || "";
+
+			if (signature && timestamp) {
+				break;
+			}
+
+			note = /consent\.google\./i.test(String(pageResponse.url || "")) ? "Google returned its consent page" : "article page had no signature";
+		} catch (error) {
+			note = error?.name === "AbortError" || error?.code === "DEADLINE" ? "article page timed out" : `article page failed (${error?.message || error})`;
+		}
 	}
 
-	const html = await readBodyCapped(pageResponse, PREVIEW_MAX_BYTES);
-	const signature = html.match(/data-n-a-sg="([^"]+)"/)?.[1];
-	const timestamp = html.match(/data-n-a-ts="([^"]+)"/)?.[1];
-
 	if (!signature || !timestamp) {
+		warnThrottled("gnews-decode-page", `[webSearch] Could not decode Google News links (${note}); falling back to headline-search links. Setting TAVILY_API_KEY avoids Google News links entirely.`);
 		return "";
 	}
 
@@ -2394,15 +2412,24 @@ const decodeGoogleNewsViaNetwork = async (id) => {
 		headers: {
 			"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
 			"User-Agent": BROWSER_USER_AGENT,
+			Referer: "https://news.google.com/",
+			Cookie: GOOGLE_CONSENT_COOKIE,
 		},
 		body: `f.req=${encodeURIComponent(JSON.stringify([[["Fbv4je", inner]]]))}`,
-	}, LINK_CHECK_TIMEOUT_MS, null);
+	}, GOOGLE_DECODE_TIMEOUT_MS, null);
 
 	if (!response.ok) {
+		warnThrottled("gnews-decode-api", "[webSearch] Google News link decoder was refused; falling back to headline-search links.", { status: response.status });
 		return "";
 	}
 
-	return parseGoogleNewsBatchResponse(await response.text());
+	const decoded = parseGoogleNewsBatchResponse(await response.text());
+
+	if (!decoded) {
+		warnThrottled("gnews-decode-parse", "[webSearch] Google News link decoder answered in an unexpected format; falling back to headline-search links.");
+	}
+
+	return decoded;
 };
 
 const decodeGoogleNewsUrl = async (value) => {
@@ -2452,44 +2479,85 @@ const verifyLiveUrl = async (value) => {
 	}
 };
 
-const resolveOneSourceLink = async (original, publisherUrl) => {
+// A Google search for the exact headline, limited to the publisher's site. It loads
+// every time and puts the article first, which beats dropping people on a home page.
+const headlineSearchUrl = (result) => {
+	const title = normalizeText(result?.title).replace(/"/g, "").slice(0, 160);
+
+	if (!title) {
+		return "";
+	}
+
+	const host = getDomain(result?.publisherUrl) || (isGoogleNewsArticleUrl(result?.url) ? "" : getDomain(result?.url));
+	const scope = host ? ` site:${host}` : (result?.publisher ? ` ${normalizeText(result.publisher)}` : "");
+
+	return `https://www.google.com/search?q=${encodeURIComponent(`"${title}"${scope}`)}`;
+};
+
+const fallbackLinkFor = (result) => {
+	const search = headlineSearchUrl(result);
+
+	if (search) {
+		return { url: search, kind: "search" };
+	}
+
+	const origin = originOf(result?.publisherUrl) || (isGoogleNewsArticleUrl(result?.url) ? "" : originOf(result?.url));
+
+	return origin ? { url: origin, kind: "publisher" } : { url: "", kind: "none" };
+};
+
+// One shared promise per link: the early prefetch and the final pass never repeat work.
+const resolveOneSourceLink = (result) => {
+	const original = String(result?.url || "");
+
+	if (!original) {
+		return Promise.resolve({ url: "", kind: "none" });
+	}
+
 	const cached = linkCache.get(original);
 
 	if (cached && cached.expires > Date.now()) {
-		return cached.value;
+		return cached.promise;
 	}
 
-	let target = original;
+	const entry = { promise: null, expires: Number.POSITIVE_INFINITY };
 
-	if (isGoogleNewsArticleUrl(original)) {
-		target = await decodeGoogleNewsUrl(original);
-	}
+	entry.promise = (async () => {
+		try {
+			let target = original;
 
-	let resolved = { url: "", kind: "none" };
+			if (isGoogleNewsArticleUrl(original)) {
+				target = await decodeGoogleNewsUrl(original);
+			}
 
-	if (target) {
-		const status = await verifyLiveUrl(target);
-
-		if (status !== "dead") {
-			resolved = { url: target, kind: "article" };
+			if (target && (await verifyLiveUrl(target)) !== "dead") {
+				return { url: target, kind: "article" };
+			}
+		} catch {
+			// fall through to the fallback link
 		}
-	}
 
-	if (!resolved.url) {
-		const fallback = originOf(publisherUrl) || (isGoogleNewsArticleUrl(original) ? "" : originOf(original));
+		return fallbackLinkFor(result);
+	})().then((resolved) => {
+		entry.expires = Date.now() + (resolved.kind === "article" ? LINK_CACHE_TTL_MS : LINK_FAIL_CACHE_TTL_MS);
+		return resolved;
+	});
 
-		if (fallback) {
-			resolved = { url: fallback, kind: "publisher" };
-		}
-	}
-
-	
 	if (linkCache.size >= LINK_CACHE_MAX) {
 		linkCache.delete(linkCache.keys().next().value);
 	}
 
-	linkCache.set(original, { value: resolved, expires: Date.now() + LINK_CACHE_TTL_MS });
-	return resolved;
+	linkCache.set(original, entry);
+	return entry.promise;
+};
+
+// Fire-and-forget warm-up. Never rejects, so it is safe to call without await.
+const prefetchSourceLinks = (sources) => {
+	if (!LINK_VERIFY_ENABLED || !Array.isArray(sources) || !sources.length) {
+		return Promise.resolve();
+	}
+
+	return mapWithConcurrency(sources, LINK_RESOLVE_CONCURRENCY, (result) => resolveOneSourceLink(result)).catch(() => {});
 };
 
 // Mutates the given result objects. Whatever happens (budget hit, network down),
@@ -2510,7 +2578,7 @@ const resolveSourceLinks = async (sources) => {
 	const work = mapWithConcurrency(sources, LINK_RESOLVE_CONCURRENCY, async (result) => {
 		if (!result?.url) return;
 
-		const resolved = await resolveOneSourceLink(result.url, result.publisherUrl);
+		const resolved = await resolveOneSourceLink(result);
 
 		if (!state.closed) {
 			apply(result, resolved);
@@ -2527,11 +2595,20 @@ const resolveSourceLinks = async (sources) => {
 	clearTimeout(timer);
 	state.closed = true;
 
+	const counts = { article: 0, search: 0, publisher: 0, none: 0 };
+
 	for (const result of sources) {
 		if (result?.url && !result.linkKind) {
-			const fallback = originOf(result.publisherUrl) || (isGoogleNewsArticleUrl(result.url) ? "" : result.url);
-			apply(result, fallback ? { url: fallback, kind: fallback === result.url ? "article" : "publisher" } : { url: "", kind: "none" });
+			apply(result, fallbackLinkFor(result));
 		}
+
+		if (result?.linkKind) {
+			counts[result.linkKind] = (counts[result.linkKind] || 0) + 1;
+		}
+	}
+
+	if (SEARCH_DEBUG) {
+		logger.log(`[webSearch] links article=${counts.article} search=${counts.search} publisher=${counts.publisher} none=${counts.none}`);
 	}
 
 	return sources;
