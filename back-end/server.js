@@ -37,13 +37,19 @@ const formatLog = (level, message, details) => {
 
 const app = express();
 const PORT = process.env.PORT || 8000;
-// FRONTEND_URL = the address(es) of the website allowed to call this API.
-// Separate several with commas, e.g. "https://quantic-nu.vercel.app,http://localhost:5173".
-// A trailing "/" is ignored. Falls back to the local dev site.
-const allowedOrigins = (process.env.FRONTEND_URL || "http://localhost:5173")
-  .split(",")
-  .map((origin) => origin.trim().replace(/\/+$/, ""))
-  .filter(Boolean);
+// Websites allowed to call this API (with cookies).
+// 1) FRONTEND_URL on the server, comma-separated, e.g. "https://a.vercel.app,http://localhost:5173".
+//    A trailing "/" is ignored. Falls back to the local dev site when unset.
+// 2) The live site below is ALWAYS allowed, so a missing or mistyped FRONTEND_URL on
+//    Render can no longer lock the website out. Change it if your Vercel address changes.
+const LIVE_SITE_ORIGINS = ["https://quantic-nu.vercel.app"];
+const allowedOrigins = [
+  ...new Set(
+    [...(process.env.FRONTEND_URL || "http://localhost:5173").split(","), ...LIVE_SITE_ORIGINS]
+      .map((origin) => origin.trim().replace(/\/+$/, ""))
+      .filter(Boolean)
+  ),
+];
 const requestBodyLimit = process.env.REQUEST_BODY_LIMIT || "1mb";
 const chatRequestBodyLimit = process.env.CHAT_REQUEST_BODY_LIMIT || "100mb";
 const apiLimiter = rateLimit({
