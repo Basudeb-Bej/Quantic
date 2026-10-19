@@ -858,25 +858,25 @@ const formatDisplayUrl = (value, maxLength = 42) => {
 const trimTrailingUrlPunctuation = (value) => String(value ?? "").replace(/[),.;:!?]+$/g, "");
 
 // Add a global error handler for links
-const handleLinkClick = (event) => {
-    const target = event.target.closest('a');
-    if (!target) return;
+// const handleLinkClick = (event) => {
+//     const target = event.target.closest('a');
+//     if (!target) return;
 
-    if (target.href) {
-        event.preventDefault();
-        try {
-            window.open(target.href, '_blank', 'noopener,noreferrer');
-        } catch (error) {
-            console.error('Failed to open link:', error);
-            // Fallback: try direct navigation
-            try {
-                window.location.href = target.href;
-            } catch (fallbackError) {
-                console.error('Failed to navigate:', fallbackError);
-            }
-        }
-    }
-};
+//     if (target.href) {
+//         event.preventDefault();
+//         try {
+//             window.open(target.href, '_blank', 'noopener,noreferrer');
+//         } catch (error) {
+//             console.error('Failed to open link:', error);
+//             // Fallback: try direct navigation
+//             try {
+//                 window.location.href = target.href;
+//             } catch (fallbackError) {
+//                 console.error('Failed to navigate:', fallbackError);
+//             }
+//         }
+//     }
+// };
 
 const renderInlineMarkdown = (text, keyPrefix) => {
     const normalizedText = String(text ?? "");
