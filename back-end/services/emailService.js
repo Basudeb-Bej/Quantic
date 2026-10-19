@@ -1,4 +1,12 @@
-// back-end/services/emailService.js
+// src/services/email.js
+import emailjs from "@emailjs/browser";
+
+// Vite এর জন্য import.meta.env অথবা Create-React-App এর জন্য process.env
+const SERVICE_ID = import.meta.env.VITE_EMAILJS_SERVICE_ID;
+const PUBLIC_KEY = import.meta.env.VITE_EMAILJS_PUBLIC_KEY;
+const OTP_TEMPLATE_ID = import.meta.env.VITE_EMAILJS_OTP_TEMPLATE_ID;
+const WELCOME_TEMPLATE_ID = import.meta.env.VITE_EMAILJS_WELCOME_TEMPLATE_ID;
+const APP_URL = import.meta.env.VITE_APP_URL || "https://quantic-nu.vercel.app";
 
 const escapeHtml = (value) =>
 	String(value ?? "")
@@ -8,65 +16,7 @@ const escapeHtml = (value) =>
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&#39;");
 
-const APP_URL = process.env.APP_URL || "http://localhost:5173";
-const EMAILJS_SERVICE_ID = process.env.EMAILJS_SERVICE_ID;
-const EMAILJS_PUBLIC_KEY = process.env.EMAILJS_PUBLIC_KEY;
-const EMAILJS_PRIVATE_KEY = process.env.EMAILJS_PRIVATE_KEY;
-
-// আপনার তৈরি করা ২টি টেমপ্লেটের আইডি
-const EMAILJS_OTP_TEMPLATE_ID = process.env.EMAILJS_OTP_TEMPLATE_ID;
-const EMAILJS_WELCOME_TEMPLATE_ID = process.env.EMAILJS_WELCOME_TEMPLATE_ID;
-
-/**
- * EmailJS REST API caller for backend Node.js
- */
-const sendEmailViaEmailJS = async (templateId, templateParams) => {
-	if (!EMAILJS_SERVICE_ID || !templateId || !EMAILJS_PUBLIC_KEY) {
-		throw new Error("EmailJS credentials are not configured properly.");
-	}
-
-	const payload = {
-		service_id: EMAILJS_SERVICE_ID,
-		template_id: templateId,
-		user_id: EMAILJS_PUBLIC_KEY,
-		accessToken: EMAILJS_PRIVATE_KEY, // Server-side API key for authorized transmission
-		template_params: templateParams,
-	};
-
-	const response = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify(payload),
-	});
-
-	if (!response.ok) {
-		const errorText = await response.text();
-		throw new Error(`EmailJS sending failed: ${response.status} - ${errorText}`);
-	}
-
-	return { success: true };
-};
-
-/**
- * CTA Button Generator for dynamic injection
- */
-const primaryButton = (href, label) => `
-	<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin: 24px auto 0;">
-		<tr>
-			<td align="center" style="border-radius: 10px; background: linear-gradient(135deg, #38bdf8 0%, #2dd4bf 100%);">
-				<a href="${escapeHtml(href)}" target="_blank" style="display: inline-block; padding: 14px 32px; font-size: 14px; font-weight: 700; letter-spacing: 0.02em; color: #06111f; text-decoration: none; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.2);">
-					${escapeHtml(label)} &rarr;
-				</a>
-			</td>
-		</tr>
-	</table>
-`;
-
-/**
- * Helper to build the registration steps section dynamically for Template 1
- */
+// Registration এর জন্য স্টেপস টেবিল এবং বাটন বিল্ডার
 const buildRegistrationStepsHtml = (steps, stepsNote, ctaLabel) => `
 	<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top: 28px; background-color: #080c16; border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 12px; text-align: left;">
 		<tr>
@@ -86,16 +36,21 @@ const buildRegistrationStepsHtml = (steps, stepsNote, ctaLabel) => `
 			</td>
 		</tr>
 	</table>
-	${ctaLabel ? primaryButton(APP_URL, ctaLabel) : ""}
+	<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin: 24px auto 0;">
+		<tr>
+			<td align="center" style="border-radius: 10px; background: linear-gradient(135deg, #38bdf8 0%, #2dd4bf 100%);">
+				<a href="${escapeHtml(APP_URL)}" target="_blank" style="display: inline-block; padding: 14px 32px; font-size: 14px; font-weight: 700; color: #06111f; text-decoration: none; border-radius: 10px;">
+					${escapeHtml(ctaLabel)} &rarr;
+				</a>
+			</td>
+		</tr>
+	</table>
 `;
 
 /**
- * 1. Send Registration OTP (Template 1)
+ * ১. Registration Email Verification OTP
  */
-const sendRegistrationOtpEmail = async ({ to, name, otp }) => {
-	if (!to) throw new Error("Recipient email is required.");
-	const displayName = name || "there";
-
+export const sendRegistrationOtpEmail = async ({ to_email, name, otp }) => {
 	const steps = [
 		"Go back to the Quantic sign-up window you just used (it should still be open on the “Verify email” screen).",
 		"Type or paste the 6-digit code into the boxes under “Verification code”.",
@@ -103,91 +58,101 @@ const sendRegistrationOtpEmail = async ({ to, name, otp }) => {
 	];
 	const stepsNote = "Closed the window? Open Quantic and register again with the same email. We’ll send you a fresh code.";
 
-	const extraContent = buildRegistrationStepsHtml(steps, stepsNote, "Open Quantic");
-
-	return sendEmailViaEmailJS(EMAILJS_OTP_TEMPLATE_ID, {
-		to_email: to,
-		name: displayName,
-		subject: "Verify your Quantic email address",
-		title: "Quantic — Verify Your Email",
-		preheader: `Your email verification code is ${otp}.`,
-		icon: "✉️",
-		heading: "Verify Your Email",
-		intro: "Thanks for signing up for Quantic. Enter the one-time code below to confirm your email address and finish creating your account:",
-		otp: String(otp || ""),
-		extra_content: extraContent,
-		year: new Date().getFullYear(),
-	});
+	return emailjs.send(
+		SERVICE_ID,
+		OTP_TEMPLATE_ID,
+		{
+			to_email,
+			name: name || "there",
+			subject: "Verify your Quantic email address",
+			title: "Quantic — Verify Your Email",
+			preheader: `Your email verification code is ${otp}.`,
+			icon: "✉️",
+			heading: "Verify Your Email",
+			intro: "Thanks for signing up for Quantic. Enter the one-time code below to confirm your email address and finish creating your account:",
+			otp: String(otp || ""),
+			extra_content: buildRegistrationStepsHtml(steps, stepsNote, "Open Quantic"),
+			year: new Date().getFullYear(),
+		},
+		PUBLIC_KEY
+	);
 };
 
 /**
- * 2. Send Login / 2FA OTP (Template 1)
+ * ২. Sign-in / 2FA Verification Code
  */
-const sendLoginOtpEmail = async ({ to, name, otp }) => {
-	if (!to) throw new Error("Recipient email is required.");
-	const displayName = name || "there";
-
-	return sendEmailViaEmailJS(EMAILJS_OTP_TEMPLATE_ID, {
-		to_email: to,
-		name: displayName,
-		subject: "Quantic Sign-in Verification Code",
-		title: "Quantic — Sign-in Code",
-		preheader: `Your authentication code is ${otp}.`,
-		icon: "🔐",
-		heading: "Verification Code",
-		intro: "A sign-in request was initiated for your Quantic account. Enter the one-time verification code below to authenticate:",
-		otp: String(otp || ""),
-		extra_content: "", // No extra steps needed for 2FA
-		year: new Date().getFullYear(),
-	});
+export const sendLoginOtpEmail = async ({ to_email, name, otp }) => {
+	return emailjs.send(
+		SERVICE_ID,
+		OTP_TEMPLATE_ID,
+		{
+			to_email,
+			name: name || "there",
+			subject: "Quantic Sign-in Verification Code",
+			title: "Quantic — Sign-in Code",
+			preheader: `Your authentication code is ${otp}.`,
+			icon: "🔐",
+			heading: "Verification Code",
+			intro: "A sign-in request was initiated for your Quantic account. Enter the one-time verification code below to authenticate:",
+			otp: String(otp || ""),
+			extra_content: "", // 2FA-তে অতিরিক্ত স্টেপসের দরকার নেই
+			year: new Date().getFullYear(),
+		},
+		PUBLIC_KEY
+	);
 };
 
 /**
- * 3. Send Password Reset OTP (Template 1)
+ * ৩. Password Reset OTP
  */
-const sendResetOtpEmail = async ({ to, name, otp }) => {
-	if (!to) throw new Error("Recipient email is required.");
-	const displayName = name || "there";
-
-	return sendEmailViaEmailJS(EMAILJS_OTP_TEMPLATE_ID, {
-		to_email: to,
-		name: displayName,
-		subject: "Quantic Password Reset OTP",
-		title: "Quantic — Password Reset",
-		preheader: `Your password reset code is ${otp}.`,
-		icon: "🔑",
-		heading: "Reset Password",
-		intro: "We received a request to reset your password. Enter the one-time authorization code below to complete the reset process:",
-		otp: String(otp || ""),
-		extra_content: "",
-		year: new Date().getFullYear(),
-	});
+export const sendResetOtpEmail = async ({ to_email, name, otp }) => {
+	return emailjs.send(
+		SERVICE_ID,
+		OTP_TEMPLATE_ID,
+		{
+			to_email,
+			name: name || "there",
+			subject: "Quantic Password Reset OTP",
+			title: "Quantic — Password Reset",
+			preheader: `Your password reset code is ${otp}.`,
+			icon: "🔑",
+			heading: "Reset Password",
+			intro: "We received a request to reset your password. Enter the one-time authorization code below to complete the reset process:",
+			otp: String(otp || ""),
+			extra_content: "",
+			year: new Date().getFullYear(),
+		},
+		PUBLIC_KEY
+	);
 };
 
 /**
- * 4. Send Welcome Email (Template 2)
+ * ৪. Welcome Email (অ্যাকাউন্ট তৈরি সম্পন্ন হলে)
  */
-const sendWelcomeEmail = async ({ to, name }) => {
-	if (!to) throw new Error("Recipient email is required.");
-	const displayName = name || "there";
-
-	return sendEmailViaEmailJS(EMAILJS_WELCOME_TEMPLATE_ID, {
-		to_email: to,
-		name: displayName,
-		subject: "Welcome to Quantic",
-		title: "Welcome to Quantic",
-		preheader: "Your Quantic account is ready. Get started with your workspace.",
-		app_url: APP_URL,
-		year: new Date().getFullYear(),
-	});
+export const sendWelcomeEmail = async ({ to_email, name }) => {
+	return emailjs.send(
+		SERVICE_ID,
+		WELCOME_TEMPLATE_ID,
+		{
+			to_email,
+			name: name || "there",
+			subject: "Welcome to Quantic",
+			title: "Welcome to Quantic",
+			preheader: "Your Quantic account is ready. Get started with your workspace.",
+			app_url: APP_URL,
+			year: new Date().getFullYear(),
+		},
+		PUBLIC_KEY
+	);
 };
 
-module.exports = {
-	sendRegistrationOtpEmail,
-	sendLoginOtpEmail,
-	sendResetOtpEmail,
-	sendWelcomeEmail,
-};
+
+
+
+
+
+
+
 
 
 
