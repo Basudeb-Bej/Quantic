@@ -112,13 +112,29 @@ mongoose.connection.on("error", (error) => {
   console.error(formatLog("error", "MongoDB connection error", { message: error?.message || String(error) }));
 });
 
+const warnedOrigins = new Set();
+
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
 app.use(
   cors({
     // Requests with no Origin header (health checks, curl) are allowed; browsers always send one.
-    origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin)),
+    origin: (origin, callback) => {
+      const allowed = !origin || allowedOrigins.includes(origin);
+
+      if (!allowed && !warnedOrigins.has(origin)) {
+        warnedOrigins.add(origin);
+        console.warn(
+          formatLog("warn", "CORS blocked an origin. Set FRONTEND_URL to match it exactly.", {
+            blockedOrigin: origin,
+            allowedOrigins,
+          })
+        );
+      }
+
+      callback(null, allowed);
+    },
     credentials: true,
     exposedHeaders: ["x-chat-thread-id"],
   })
