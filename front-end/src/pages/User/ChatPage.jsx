@@ -4653,12 +4653,12 @@ function ChatPage() {
         submitChatMessage(messageDraft.trim(), { attachments: combinedAttachments });
     };
 
-    useEffect(() => {
-        document.addEventListener('click', handleLinkClick);
-        return () => {
-            document.removeEventListener('click', handleLinkClick);
-        };
-    }, []);
+    // useEffect(() => {
+    //     document.addEventListener('click', handleLinkClick);
+    //     return () => {
+    //         document.removeEventListener('click', handleLinkClick);
+    //     };
+    // }, []);
 
     const [announcement, setAnnouncement] = useState({ enabled: false, messages: [] });
 
