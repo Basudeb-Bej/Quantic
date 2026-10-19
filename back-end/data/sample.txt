@@ -1,0 +1,8 @@
+Quantic AI sample knowledge base.
+
+This file is used by the ingest script to build the local vector store.
+
+Quantic AI helps users chat, retrieve memory, and answer questions using RAG.
+It can route messages to tools, memory, or knowledge retrieval when needed.
+
+Feel free to replace this content with project documentation, FAQs, or notes.
