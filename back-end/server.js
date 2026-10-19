@@ -37,7 +37,13 @@ const formatLog = (level, message, details) => {
 
 const app = express();
 const PORT = process.env.PORT || 8000;
-const frontendOrigin = process.env.FRONTEND_URL || "http://localhost:5173";
+// FRONTEND_URL = the address(es) of the website allowed to call this API.
+// Separate several with commas, e.g. "https://quantic-nu.vercel.app,http://localhost:5173".
+// A trailing "/" is ignored. Falls back to the local dev site.
+const allowedOrigins = (process.env.FRONTEND_URL || "http://localhost:5173")
+  .split(",")
+  .map((origin) => origin.trim().replace(/\/+$/, ""))
+  .filter(Boolean);
 const requestBodyLimit = process.env.REQUEST_BODY_LIMIT || "1mb";
 const chatRequestBodyLimit = process.env.CHAT_REQUEST_BODY_LIMIT || "100mb";
 const apiLimiter = rateLimit({
@@ -111,7 +117,8 @@ app.set("trust proxy", 1);
 
 app.use(
   cors({
-    origin: frontendOrigin,
+    // Requests with no Origin header (health checks, curl) are allowed; browsers always send one.
+    origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin)),
     credentials: true,
     exposedHeaders: ["x-chat-thread-id"],
   })
