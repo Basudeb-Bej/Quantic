@@ -2475,13 +2475,29 @@ const resolveOneSourceLink = async (original, publisherUrl) => {
 		}
 	}
 
-	if (!resolved.url) {
-		const fallback = originOf(publisherUrl) || (isGoogleNewsArticleUrl(original) ? "" : originOf(original));
+	// if (!resolved.url) {
+	// 	const fallback = originOf(publisherUrl) || (isGoogleNewsArticleUrl(original) ? "" : originOf(original));
 
-		if (fallback) {
-			resolved = { url: fallback, kind: "publisher" };
-		}
-	}
+	// 	if (fallback) {
+	// 		resolved = { url: fallback, kind: "publisher" };
+	// 	}
+	// }
+
+	
+if (!resolved.url) {
+    if (isGoogleNewsArticleUrl(original)) {
+        resolved = { url: original, kind: "article" };
+    } else {
+        const fallback = originOf(original);
+
+        if (fallback) {
+            resolved = { url: original, kind: "article" };
+        } else {
+            resolved = { url: "", kind: "none" };
+        }
+    }
+}
+
 
 	if (linkCache.size >= LINK_CACHE_MAX) {
 		linkCache.delete(linkCache.keys().next().value);
