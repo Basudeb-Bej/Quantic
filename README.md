@@ -4,8 +4,7 @@
 
 🌐 **Live Demo**: [quantic-nu.vercel.app](https://quantic-nu.vercel.app)
 
-![Quantic Screenshot](https://quantic-nu.vercel.app/og-image.png)  
-<!-- Replace with a real screenshot or social preview image later -->
+
 
 ---
 
