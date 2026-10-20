@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement for Quantic
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: What user need or problem would this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior or improvement you would like.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternative approaches or trade-offs?
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Add mockups or examples, ensuring they contain no secrets or private data.
