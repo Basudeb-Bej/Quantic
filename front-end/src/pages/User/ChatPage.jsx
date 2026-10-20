@@ -23,7 +23,7 @@ import {
 } from "../../services/voiceService";
 import { useToasts } from "../../hooks/useToasts";
 
-const apiBaseUrl = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/+$/, "");
+const apiBaseUrl = (import.meta.env.PROD ? "" : (import.meta.env.VITE_API_URL || "http://localhost:8000")).replace(/\/+$/, "");
 const activeViewStorageKey = "quantic_active_view";
 const sidebarOpenStorageKey = "quantic_sidebar_open";
 const authKnownStorageKey = "quantic_auth_known";
