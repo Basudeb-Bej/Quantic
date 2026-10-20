@@ -5,6 +5,8 @@
 
 <div align="center">
 
+<img src="docs/assets/quantic-banner.svg" alt="Quantic — Conversations with context" width="100%" />
+
 # ✦ Quantic
 
 ### A modern AI chat experience with memory, retrieval, and document understanding.
