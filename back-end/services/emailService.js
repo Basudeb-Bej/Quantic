@@ -9,7 +9,7 @@ const getConfig = () => {
 		publicKey: String(process.env.EMAILJS_PUBLIC_KEY || "").trim(),
 		privateKey: String(process.env.EMAILJS_PRIVATE_KEY || "").trim(),
 		otpTemplateId: String(process.env.EMAILJS_OTP_TEMPLATE_ID || "").trim(),
-		generalTemplateId: String(process.env.EMAILJS_GENERAL_TEMPLATE_ID || "").trim(),
+		generalTemplateId: String(process.env.EMAILJS_GENERAL_TEMPLATE_ID || process.env.EMAILJS_WELCOME_TEMPLATE_ID || "").trim(),
 	};
 
 	const missing = [
@@ -80,6 +80,8 @@ const requireRecipient = (to) => {
 	}
 };
 
+// Values are passed RAW: EmailJS escapes {{variables}} itself.
+// The one exception is the feedback message, which is escaped here so line breaks can become <br>.
 const escapeHtml = (value) =>
 	String(value ?? "")
 		.replace(/&/g, "&amp;")
@@ -87,6 +89,10 @@ const escapeHtml = (value) =>
 		.replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&#39;");
+
+/* ------------------------------------------------------------------------- *
+ * Template 1: OTP emails (login 2FA / password reset / registration)
+ * ------------------------------------------------------------------------- */
 
 const OTP_EMAILS = {
 	login: {
