@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a reproducible problem in Quantic
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Please remove secrets, tokens, personal data, and private logs before submitting."
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+      placeholder: A clear, concise description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the steps needed to reproduce the issue.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Frontend
+        - Backend / API
+        - Authentication
+        - Chat / AI
+        - Memory / RAG
+        - Document processing
+        - Deployment / configuration
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, browser, and relevant versions. Do not include credentials.
