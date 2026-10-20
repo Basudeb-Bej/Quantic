@@ -1,7 +1,7 @@
 // back-end/services/emailService.js
 const EMAILJS_ENDPOINT = "https://api.emailjs.com/api/v1.0/email/send";
 const EMAILJS_TIMEOUT_MS = Number(process.env.EMAILJS_TIMEOUT_MS || 15000);
-const APP_URL = process.env.APP_URL || "http://localhost:5173";
+const APP_URL = process.env.APP_URL || (process.env.NODE_ENV === "production" ? "https://quantic-nu.vercel.app" : "http://localhost:5173");
 
 const getConfig = () => {
 	const config = {
