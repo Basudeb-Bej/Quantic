@@ -56,6 +56,7 @@ const sendWithEmailJs = async (templateKey, templateParams) => {
 	}
 
 	const safeTemplateParams = { ...templateParams, to_email: recipient };
+	const templateId = templateKey === "otp" ? config.otpTemplateId : config.generalTemplateId;
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), EMAILJS_TIMEOUT_MS);
 
@@ -65,7 +66,7 @@ const sendWithEmailJs = async (templateKey, templateParams) => {
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
 				service_id: config.serviceId,
-				template_id: templateKey === "otp" ? config.otpTemplateId : config.generalTemplateId,
+				template_id: templateId,
 				user_id: config.publicKey,
 				...(config.privateKey ? { accessToken: config.privateKey } : {}),
 				template_params: safeTemplateParams,
@@ -88,6 +89,7 @@ const sendWithEmailJs = async (templateKey, templateParams) => {
 		// Log only a masked destination so production logs can help verify routing without exposing full addresses.
 		console.info("[EmailJS] Send request accepted", {
 			template: templateKey,
+			templateId,
 			to: maskEmail(recipient),
 			status: response.status,
 		});
