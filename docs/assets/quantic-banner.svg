@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">Quantic — AI chat with context</title>
+  <desc id="desc">A dark, premium purple and blue abstract banner for the Quantic AI chatbot project.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#090b18"/>
+      <stop offset="0.55" stop-color="#11112b"/>
+      <stop offset="1" stop-color="#081c35"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.72" cy="0.28" r="0.65">
+      <stop offset="0" stop-color="#6d5dfc" stop-opacity=".26"/>
+      <stop offset="1" stop-color="#6d5dfc" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#a5b4fc" stroke-opacity=".08" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="360" rx="28" fill="url(#bg)"/>
+  <rect width="1200" height="360" rx="28" fill="url(#glow)"/>
+  <rect width="1200" height="360" rx="28" fill="url(#grid)"/>
+  <circle cx="930" cy="165" r="124" fill="none" stroke="url(#accent)" stroke-opacity=".45" stroke-width="1.5"/>
+  <circle cx="930" cy="165" r="88" fill="none" stroke="url(#accent)" stroke-opacity=".6" stroke-width="1.5"/>
+  <circle cx="930" cy="165" r="52" fill="#11112b" stroke="url(#accent)" stroke-width="2"/>
+  <path d="M907 143h46a12 12 0 0 1 12 12v22a12 12 0 0 1-12 12h-18l-17 13v-13h-11a12 12 0 0 1-12-12v-22a12 12 0 0 1 12-12z" fill="none" stroke="url(#accent)" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="917" cy="166" r="3.5" fill="#c4b5fd"/>
+  <circle cx="930" cy="166" r="3.5" fill="#a5b4fc"/>
+  <circle cx="943" cy="166" r="3.5" fill="#7dd3fc"/>
+  <circle cx="1057" cy="74" r="4" fill="#38bdf8"/>
+  <circle cx="811" cy="258" r="3" fill="#a78bfa"/>
+  <path d="M835 75h80M875 55v40M1010 250h75M1047 230v40" stroke="#93c5fd" stroke-opacity=".32" stroke-width="1.5"/>
+  <text x="76" y="102" fill="#a5b4fc" font-family="Inter,Arial,sans-serif" font-size="15" font-weight="700" letter-spacing="4">AI • CONTEXT • KNOWLEDGE</text>
+  <text x="72" y="190" fill="#ffffff" font-family="Inter,Arial,sans-serif" font-size="76" font-weight="800" letter-spacing="-3">QUANTIC</text>
+  <rect x="76" y="218" width="58" height="4" rx="2" fill="url(#accent)"/>
+  <text x="76" y="258" fill="#dbeafe" font-family="Inter,Arial,sans-serif" font-size="24" font-weight="500">Conversations with context.</text>
+  <text x="76" y="294" fill="#94a3b8" font-family="Inter,Arial,sans-serif" font-size="16">RAG  /  Long-term memory  /  Document understanding</text>
+</svg>
