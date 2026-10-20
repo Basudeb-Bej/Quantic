@@ -12,7 +12,7 @@ const RESEND_COOLDOWN_SECONDS = 60;
 
 // The backend address comes from front-end/.env (VITE_API_URL). Without it, local
 // development falls back to http://localhost:8000. The auth router is mounted at /api/auth.
-const API_ORIGIN = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/+$/, "");
+const API_ORIGIN = (import.meta.env.PROD ? "" : (import.meta.env.VITE_API_URL || "http://localhost:8000")).replace(/\/+$/, "");
 const AUTH_API_BASE_OVERRIDE = `${API_ORIGIN}/api/auth`;
 const AUTH_BASE_CANDIDATES = ["/api/auth"];
 

@@ -23,7 +23,7 @@ import {
 } from "../../services/voiceService";
 import { useToasts } from "../../hooks/useToasts";
 
-const apiBaseUrl = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/+$/, "");
+const apiBaseUrl = (import.meta.env.PROD ? "" : (import.meta.env.VITE_API_URL || "http://localhost:8000")).replace(/\/+$/, "");
 const activeViewStorageKey = "quantic_active_view";
 const sidebarOpenStorageKey = "quantic_sidebar_open";
 const authKnownStorageKey = "quantic_auth_known";
@@ -4471,7 +4471,16 @@ function ChatPage() {
                     return { success: true };
                 }
 
-                handleLogin(responseData.user);
+                // Do not show a successful login until the browser proves it retained the HttpOnly session cookie.
+                const sessionResponse = await fetch(`${apiBaseUrl}/api/auth/me`, {
+                    credentials: "include",
+                });
+                const sessionData = await readJsonResponse(sessionResponse);
+                if (!sessionResponse.ok || !sessionData?.user) {
+                    throw new Error("Your code was accepted, but this browser did not establish a session. Please try again.");
+                }
+
+                handleLogin(sessionData.user);
                 return { success: true, newBrowserLogin: responseData?.newBrowserLogin };
             }
 
@@ -4622,7 +4631,16 @@ function ChatPage() {
                 return { twoFactorRequired: true, email: responseData?.email || trimmedEmail };
             }
 
-            handleLogin(responseData.user);
+            // Verify the session cookie works before updating the UI to signed-in.
+            const sessionResponse = await fetch(`${apiBaseUrl}/api/auth/me`, {
+                credentials: "include",
+            });
+            const sessionData = await readJsonResponse(sessionResponse);
+            if (!sessionResponse.ok || !sessionData?.user) {
+                throw new Error("Your password was accepted, but this browser did not establish a session. Please try again.");
+            }
+
+            handleLogin(sessionData.user);
         } catch (error) {
             setAuthError(error instanceof Error ? error.message : "Something went wrong.");
         } finally {
