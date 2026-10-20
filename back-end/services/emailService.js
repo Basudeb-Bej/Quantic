@@ -28,12 +28,34 @@ const getConfig = () => {
 	return config;
 };
 
+const normalizeRecipient = (value) => String(value ?? "").trim().toLowerCase();
+
+const maskEmail = (value) => {
+	const email = normalizeRecipient(value);
+	const at = email.lastIndexOf("@");
+
+	if (at <= 0 || at === email.length - 1) {
+		return email ? "[invalid-email]" : "[missing-email]";
+	}
+
+	const local = email.slice(0, at);
+	const domain = email.slice(at + 1);
+	return local.slice(0, 1) + "***@" + domain;
+};
+
 const sendWithEmailJs = async (templateKey, templateParams) => {
 	if (typeof fetch !== "function") {
 		throw new Error("Email service needs Node.js 18 or newer (global fetch).");
 	}
 
 	const config = getConfig();
+	const recipient = normalizeRecipient(templateParams?.to_email);
+
+	if (!recipient) {
+		throw new Error("Recipient email is required.");
+	}
+
+	const safeTemplateParams = { ...templateParams, to_email: recipient };
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), EMAILJS_TIMEOUT_MS);
 
@@ -46,7 +68,7 @@ const sendWithEmailJs = async (templateKey, templateParams) => {
 				template_id: templateKey === "otp" ? config.otpTemplateId : config.generalTemplateId,
 				user_id: config.publicKey,
 				...(config.privateKey ? { accessToken: config.privateKey } : {}),
-				template_params: templateParams,
+				template_params: safeTemplateParams,
 			}),
 			signal: controller.signal,
 		});
@@ -61,6 +83,14 @@ const sendWithEmailJs = async (templateKey, templateParams) => {
 			error.status = response.status;
 			throw error;
 		}
+
+		// EmailJS 200 means the request was accepted, not that the recipient's inbox received it.
+		// Log only a masked destination so production logs can help verify routing without exposing full addresses.
+		console.info("[EmailJS] Send request accepted", {
+			template: templateKey,
+			to: maskEmail(recipient),
+			status: response.status,
+		});
 
 		return { ok: true, status: response.status };
 	} catch (error) {
