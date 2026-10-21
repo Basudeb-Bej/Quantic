@@ -654,7 +654,7 @@ function LoginModals({
 							</span>
 							<span className="qa-brand__text">
 								<span className="qa-brand__name">Quantic</span>
-								<span className="qa-brand__tag">Workspace access</span>
+								{/* <span className="qa-brand__tag">Workspace access</span> */}
 							</span>
 						</div>
 
