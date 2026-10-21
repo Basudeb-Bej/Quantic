@@ -3,6 +3,10 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
+import { installAuthFetch } from './services/authToken'
+
+// Attach the saved login token to API calls (phones and incognito block the login cookie).
+installAuthFetch()
 
 if (import.meta.env.DEV) {
 	const originalConsoleError = console.error;
