@@ -2360,7 +2360,13 @@ async function handleChat(req, res) {
 		plan.useWeb = true;
 	}
 	const configuredChatModel = normalizeText(systemSettings?.model?.chatModel);
-	const model = configuredChatModel || selectModel(normalizedMessage, plan.intent, resolveModelComplexity(plan));
+	// Image questions must use a vision-capable model; the normal chat model
+	// may accept only text, in which case OCR alone cannot answer scene questions.
+	const hasImageAttachments = Array.isArray(attachments) && attachments.some(isImageAttachment);
+	const visionModel = normalizeText(process.env.GROQ_VISION_MODEL) || "qwen/qwen3.6-27b";
+	const model = hasImageAttachments
+		? visionModel
+		: configuredChatModel || selectModel(normalizedMessage, plan.intent, resolveModelComplexity(plan));
 
 	const compoundRequest = isCompoundInfoRequest(normalizedMessage);
 	if ((compoundRequest && plan.tool === "weather") || (messageIsCompound && asksForAdditionalWebInfo(normalizedMessage))) {
@@ -2417,6 +2423,7 @@ LATEST-TURN PRIORITY:
 - Treat the current user message and any successfully extracted attachment contents as the primary task.
 - Use earlier conversation only when it helps interpret the latest request; never repeat a prior answer merely because it appears in history.
 - If an attachment was provided, explicitly use its extracted contents. If extraction failed or produced no text, state that instead of guessing.
+- If image attachments are available, inspect the original image itself for visual questions (objects, people, scene, colors, and counts). OCR text is not a substitute for visual understanding. Count only visible people/objects and answer directly.
 - Be tolerant of obvious spelling mistakes, typos, and phonetic misspellings in the user's question. Infer the intended word or entity from context when unambiguous (for example, "Rassia" means "Russia"); answer the intended question instead of treating the typo as an unknown entity.
 - If a typo makes the request genuinely ambiguous, ask one brief clarification question rather than claiming that no reliable information exists.
 - Do not silently change names, numbers, locations, or technical identifiers when the intended correction is uncertain.
@@ -2445,6 +2452,9 @@ PROOFREADING TASK (only because the user explicitly requested it):
 			intent: plan.intent,
 			complexity: plannerComplexity,
 			hasAttachmentAnalysis: Boolean(attachmentAnalysis),
+			visionImages: hasImageAttachments
+				? attachments.filter(isImageAttachment).slice(0, 3).map((attachment) => ({ name: attachment.name, dataUrl: attachment.dataUrl }))
+				: [],
 		});
 		reply = buildSourcesMarker(extractWebSources(webContext)) + sanitizeCitationFormatting(reply, countWebContextSources(webContext));
 		res.status(200).end(reply);
@@ -2469,6 +2479,9 @@ PROOFREADING TASK (only because the user explicitly requested it):
 		intent: plan.intent,
 		complexity: plannerComplexity,
 		hasAttachmentAnalysis: Boolean(attachmentAnalysis),
+		visionImages: hasImageAttachments
+			? attachments.filter(isImageAttachment).slice(0, 3).map((attachment) => ({ name: attachment.name, dataUrl: attachment.dataUrl }))
+			: [],
 	});
 	reply = sourcesMarker + sanitizeCitationFormatting(reply, countWebContextSources(webContext));
 	if (shouldPersistHistory && conversationThread?._id) {
