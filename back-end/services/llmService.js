@@ -961,6 +961,29 @@ const buildChatMessages = ({ prompt, profile, options = {} }) => {
     }
   }
 
+  // OCR is useful for text in a picture, but it cannot answer visual questions
+  // such as counting people or identifying objects. Pass the original image data
+  // to a vision-capable model as multimodal user content as well.
+  const visionImages = Array.isArray(options?.visionImages)
+    ? options.visionImages
+        .filter((image) => typeof image?.dataUrl === "string" && /^data:image\/(?:png|jpe?g|webp|gif|bmp|tiff?);base64,/i.test(image.dataUrl))
+        .slice(0, 3)
+    : [];
+
+  if (visionImages.length) {
+    const content = [{ type: "text", text: prompt }];
+    for (const image of visionImages) {
+      content.push({
+        type: "image_url",
+        image_url: { url: image.dataUrl, detail: "auto" },
+      });
+    }
+    return [...systemMessages, {
+      role: "user",
+      content,
+    }];
+  }
+
   return [...systemMessages, { role: "user", content: prompt }];
 };
 
