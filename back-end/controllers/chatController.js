@@ -184,7 +184,7 @@ const OFFICE_DOCUMENT_EXTENSIONS = new Set([
 const CODE_FILE_EXTENSIONS = new Set([
 	"js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "java", "c", "h", "cpp", "cc", "hpp",
 	"cs", "go", "rs", "rb", "php", "swift", "kt", "kts", "scala", "sql", "sh", "bash",
-	"yml", "yaml", "toml", "ini", "env", "md", "css", "scss", "less", "vue",
+	"yml", "yaml", "toml", "ini", "env", "md", "markdown", "css", "scss", "sass", "less", "vue",
 	"svelte", "json5", "graphql", "proto", "gradle", "r", "pl", "lua",
 	"txt", "text", "log", "csv", "tsv", "json", "xml", "html", "htm", "xhtml",
 	"properties", "conf", "cfg", "config", "makefile", "dockerfile", "bat", "cmd", "ps1",
