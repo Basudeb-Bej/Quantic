@@ -1943,39 +1943,55 @@ function ChatPage() {
     const handleAttachmentButtonClick = () => {
         attachmentInputRef.current?.click();
     };
+    const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+    const MAX_ATTACHMENTS_PER_MESSAGE = 6;
+
     const handleAttachmentInputChange = (event) => {
         const files = Array.from(event.target.files || []);
-        if (!files.length) {
-            return;
-        }
+        event.target.value = "";
+        if (!files.length) return;
+
+        const accepted = files.filter((file) => {
+            if (file.size > MAX_ATTACHMENT_BYTES) {
+                showToast(`“${file.name}” is larger than 8 MB. Please choose a smaller file.`, { type: "error" });
+                return false;
+            }
+            return true;
+        });
+
+        if (!accepted.length) return;
 
         void Promise.all(
-            files.map(async (file) => {
+            accepted.map(async (file) => {
                 const key = `${file.name}-${file.size}-${file.lastModified}`;
                 const dataUrl = await readFileAsDataUrl(file);
                 return {
                     key,
                     name: file.name,
                     size: file.size,
-                    type: file.type,
+                    type: file.type || "application/octet-stream",
                     dataUrl,
                 };
             })
         ).then((attachments) => {
             setSelectedAttachments((current) => {
                 const nextAttachments = [...current];
-
                 for (const attachment of attachments) {
-                    if (!nextAttachments.some((currentAttachment) => currentAttachment.key === attachment.key)) {
+                    if (!nextAttachments.some((existing) => existing.key === attachment.key)) {
                         nextAttachments.push(attachment);
                     }
                 }
 
+                if (nextAttachments.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+                    showToast(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`, { type: "warning" });
+                    return nextAttachments.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+                }
                 return nextAttachments;
             });
+        }).catch((error) => {
+            console.error("[ChatPage] attachment read failed", error);
+            showToast("Quantic could not read one of those files. Try another file or a smaller copy.", { type: "error" });
         });
-
-        event.target.value = "";
     };
 
     const handleComposerPaste = (event) => {
