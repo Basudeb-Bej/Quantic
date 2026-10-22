@@ -64,7 +64,7 @@ const sendWithSmtp = async (templateKey, templateParams) => {
 	} else if (isFeedback) {
 		const feedback = String(templateParams?.fb_message_html || "");
 		contentHtml = `<p>New feedback from ${escapeHtml(templateParams?.fb_name || "Unknown")} (${escapeHtml(templateParams?.fb_email || "Unknown")}).</p><p>Topics: ${escapeHtml(templateParams?.fb_topics || "General")}</p><div style="white-space:normal;border:1px solid #ddd;padding:16px;border-radius:8px">${feedback}</div>`;
-		contentText = [`Feedback from: ${templateParams?.fb_name || "Unknown"}`, `Email: ${templateParams?.fb_email || "Unknown"}`, `Topics: ${templateParams?.fb_topics || "General"}`, feedback.replace(/<br\\s*\\/?\\s*>/gi, "\n").replace(/<[^>]*>/g, "")].join("\n\n");
+		contentText = [`Feedback from: ${templateParams?.fb_name || "Unknown"}`, `Email: ${templateParams?.fb_email || "Unknown"}`, `Topics: ${templateParams?.fb_topics || "General"}`, feedback.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]*>/g, "")].join("\n\n");
 	} else if (isWelcome) {
 		contentHtml = `<p>Hello ${escapeHtml(name)},</p><p>Your Quantic account is ready. You can now start chatting, exploring ideas, and working with your files.</p><p><a href="${escapeHtml(appUrl)}">Open Quantic</a></p>`;
 		contentText = `Hello ${name},\n\nYour Quantic account is ready.\n\nOpen Quantic: ${appUrl}`;
