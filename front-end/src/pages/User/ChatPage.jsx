@@ -1974,19 +1974,21 @@ function ChatPage() {
                 };
             })
         ).then((attachments) => {
+            const uniqueIncoming = attachments.filter((attachment) =>
+                !selectedAttachments.some((existing) => existing.key === attachment.key)
+            );
+            const remainingSlots = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - selectedAttachments.length);
+            if (uniqueIncoming.length > remainingSlots) {
+                showToast(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`, { type: "warning" });
+            }
             setSelectedAttachments((current) => {
                 const nextAttachments = [...current];
-                for (const attachment of attachments) {
+                for (const attachment of uniqueIncoming.slice(0, remainingSlots)) {
                     if (!nextAttachments.some((existing) => existing.key === attachment.key)) {
                         nextAttachments.push(attachment);
                     }
                 }
-
-                if (nextAttachments.length > MAX_ATTACHMENTS_PER_MESSAGE) {
-                    showToast(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`, { type: "warning" });
-                    return nextAttachments.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
-                }
-                return nextAttachments;
+                return nextAttachments.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
             });
         }).catch((error) => {
             console.error("[ChatPage] attachment read failed", error);
@@ -4833,7 +4835,7 @@ function ChatPage() {
                                             rows={1}
                                             value={messageDraft}
                                             autoComplete="off"
-                                            autoCorrect="off"
+                                            autoCorrect="on"
                                             spellCheck="true"
                                             data-lpignore="true"
                                             data-1p-ignore="true"
@@ -5089,7 +5091,7 @@ function ChatPage() {
                                             rows={1}
                                             value={messageDraft}
                                             autoComplete="off"
-                                            autoCorrect="off"
+                                            autoCorrect="on"
                                             spellCheck="true"
                                             data-lpignore="true"
                                             data-1p-ignore="true"
