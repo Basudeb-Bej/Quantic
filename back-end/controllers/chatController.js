@@ -2380,7 +2380,23 @@ async function handleChat(req, res) {
 
 	logger.info("[chatController] plan", { userId, plan, model, streamMode });
 
-	const prompt = await buildPrompt(normalizedMessage, promptOptions);
+	const proofreadingRequested =
+		/\b(spell(?:ing)?[ -]?check|spelling errors?|typos?|proofread(?:ing)?|grammar(?: check| errors?)?|correct (?:the )?(?:spelling|grammar|english)|check (?:my |this |the )?(?:spelling|grammar|writing)|language errors?)\b/i.test(normalizedMessage);
+
+	let prompt = await buildPrompt(normalizedMessage, promptOptions);
+	if (proofreadingRequested) {
+		prompt += `
+
+PROOFREADING TASK (only because the user explicitly requested it):
+- Inspect the user's text and all extracted attachment text for spelling, grammar, punctuation, and obvious word-choice errors.
+- Report each finding with the original phrase, a corrected version, and a brief explanation.
+- For files, include page/slide/sheet/line references when extraction provides them; never invent locations.
+- Separate definite errors from optional style improvements.
+- If no errors are found in the available text, say so clearly.
+- Do not claim to have checked unreadable or unsupported file contents. If extraction is partial, state that limitation.
+- Preserve the user's intended meaning and do not silently rewrite unrelated content.
+`;
+	}
 	let reply = "";
 	const plannerComplexity = resolveModelComplexity(plan);
 	const shouldStreamResponse = streamMode && plannerComplexity !== "complex";
