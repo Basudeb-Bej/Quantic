@@ -2417,6 +2417,11 @@ LATEST-TURN PRIORITY:
 - Treat the current user message and any successfully extracted attachment contents as the primary task.
 - Use earlier conversation only when it helps interpret the latest request; never repeat a prior answer merely because it appears in history.
 - If an attachment was provided, explicitly use its extracted contents. If extraction failed or produced no text, state that instead of guessing.
+- Be tolerant of obvious spelling mistakes, typos, and phonetic misspellings in the user's question. Infer the intended word or entity from context when unambiguous (for example, "Rassia" means "Russia"); answer the intended question instead of treating the typo as an unknown entity.
+- If a typo makes the request genuinely ambiguous, ask one brief clarification question rather than claiming that no reliable information exists.
+- Do not silently change names, numbers, locations, or technical identifiers when the intended correction is uncertain.
+- When the user explicitly asks to detect/check spelling or grammar, perform an actual proofreading pass and list the original text, correction, and reason. Do not merely answer the underlying topic.
+- For attachments, distinguish between file receipt, successful content extraction, and actual semantic analysis. Never imply that OCR alone can count objects or understand a scene in an image.
 `;
 	if (proofreadingRequested) {
 		prompt += `
