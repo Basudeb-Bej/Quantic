@@ -1805,7 +1805,7 @@ const streamGroqResponse = async (prompt, res, query, model, options = {}) => {
   res.on("close", onClientClose);
 
   try {
-    const models = await resolveModelChain(profile, model);
+    const models = options?.visionOnly ? await resolveVisionModelChain(model) : await resolveModelChain(profile, model);
     const maxTokens = resolveMaxTokens(profile);
 
     const { response, model: usedModel } = await requestWithModelChain({
