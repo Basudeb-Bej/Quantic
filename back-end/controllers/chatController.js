@@ -170,15 +170,25 @@ const OFFICE_DOCUMENT_MIME_TYPES = new Set([
 	"application/vnd.ms-powerpoint",
 	"application/x-mspowerpoint",
 	"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	"application/vnd.oasis.opendocument.text",
+	"application/vnd.oasis.opendocument.spreadsheet",
+	"application/vnd.oasis.opendocument.presentation",
+	"application/rtf",
+	"text/rtf",
 ]);
 
-const OFFICE_DOCUMENT_EXTENSIONS = new Set(["doc", "docx", "xls", "xlsx", "ppt", "pptx"]);
+const OFFICE_DOCUMENT_EXTENSIONS = new Set([
+	"doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
+]);
 
 const CODE_FILE_EXTENSIONS = new Set([
 	"js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "java", "c", "h", "cpp", "cc", "hpp",
 	"cs", "go", "rs", "rb", "php", "swift", "kt", "kts", "scala", "sql", "sh", "bash",
 	"yml", "yaml", "toml", "ini", "env", "md", "css", "scss", "less", "vue",
 	"svelte", "json5", "graphql", "proto", "gradle", "r", "pl", "lua",
+	"txt", "text", "log", "csv", "tsv", "json", "xml", "html", "htm", "xhtml",
+	"properties", "conf", "cfg", "config", "makefile", "dockerfile", "bat", "cmd", "ps1",
+	"ipynb", "tex", "bib", "diff", "patch", "gitignore", "editorconfig",
 ]);
 
 const isCodeFileAttachment = (attachment) => CODE_FILE_EXTENSIONS.has(getAttachmentExtension(attachment));
@@ -268,8 +278,13 @@ const normalizeLegacyImageMessage = (message) => {
 	};
 };
 
-const isImageAttachment = (attachment) => String(attachment?.type || "").toLowerCase().startsWith("image/") && normalizeText(attachment?.dataUrl).startsWith("data:");
-const isPdfAttachment = (attachment) => String(attachment?.type || "").toLowerCase() === "application/pdf" && normalizeText(attachment?.dataUrl).startsWith("data:");
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "avif"]);
+const isImageAttachment = (attachment) =>
+	(String(attachment?.type || "").toLowerCase().startsWith("image/") || IMAGE_EXTENSIONS.has(getAttachmentExtension(attachment))) &&
+	normalizeText(attachment?.dataUrl).startsWith("data:");
+const isPdfAttachment = (attachment) =>
+	(String(attachment?.type || "").toLowerCase() === "application/pdf" || getAttachmentExtension(attachment) === "pdf") &&
+	normalizeText(attachment?.dataUrl).startsWith("data:");
 const getAttachmentExtension = (attachment) => {
 	const fileName = normalizeText(attachment?.name).toLowerCase();
 	const match = fileName.match(/\.([a-z0-9]+)$/);
@@ -312,11 +327,19 @@ const isTextAttachment = (attachment) => {
 		mimeType === "application/xml" ||
 		mimeType === "application/xhtml+xml" ||
 		mimeType === "application/csv" ||
-		mimeType === "text/csv"
+		mimeType === "text/csv" ||
+		mimeType === "application/ld+json" ||
+		mimeType === "application/yaml" ||
+		mimeType === "application/x-yaml" ||
+		mimeType === "application/x-ndjson" ||
+		mimeType === "application/javascript" ||
+		mimeType === "application/x-javascript"
 	) {
 		return true;
 	}
 
+	// Some browsers / cloud drives label plain text and code as octet-stream.
+	// Extension fallback lets us parse known textual formats without trusting MIME alone.
 	return isCodeFileAttachment(attachment);
 };
 
@@ -512,11 +535,19 @@ const buildDocumentAttachmentAnalysis = async (attachment, index) => {
 		].join("\n");
 	}
 
-	return `${attachment.name || `Attachment ${index + 1}`}: unsupported attachment type (${attachment.type || "unknown"}).`;
+	return `${attachment.name || `Attachment ${index + 1}`}: this file format cannot be text-extracted by the current Quantic parser (${attachment.type || "unknown"}). The file was attached, but its contents were not analyzed. If it is an audio/video/archive/binary format, convert it to a supported text or document format first.`;
 };
 
+const MAX_ANALYZED_ATTACHMENTS = 10;
 const buildAttachmentAnalysis = async (attachments = []) => {
-	const normalizedAttachments = Array.isArray(attachments) ? attachments.slice(0, 6) : [];
+	const allAttachments = Array.isArray(attachments) ? attachments : [];
+	const normalizedAttachments = allAttachments.slice(0, MAX_ANALYZED_ATTACHMENTS);
+	if (allAttachments.length > MAX_ANALYZED_ATTACHMENTS) {
+		logger.warn("[chatController] attachment count truncated", {
+			provided: allAttachments.length,
+			analyzed: MAX_ANALYZED_ATTACHMENTS,
+		});
+	}
 
 	if (normalizedAttachments.length === 0) {
 		return "";
@@ -2349,7 +2380,23 @@ async function handleChat(req, res) {
 
 	logger.info("[chatController] plan", { userId, plan, model, streamMode });
 
-	const prompt = await buildPrompt(normalizedMessage, promptOptions);
+	const proofreadingRequested =
+		/\b(?:spell(?:ing)?[ -]?(?:check|mistakes?|errors?)|typos?|proofread(?:ing)?|grammar(?:[ -]?(?:check|mistakes?|errors?))?|punctuation(?:[ -]?(?:check|mistakes?|errors?))?|correct (?:the )?(?:spelling|grammar|english|punctuation)|check (?:my |this |the |these )?(?:spelling|grammar|writing|text|document|file)|review (?:my |this |the |these )?(?:writing|text|document|file)|find (?:and )?fix (?:the )?(?:mistakes?|errors?)|language errors?)\b/i.test(normalizedMessage);
+
+	let prompt = await buildPrompt(normalizedMessage, promptOptions);
+	if (proofreadingRequested) {
+		prompt += `
+
+PROOFREADING TASK (only because the user explicitly requested it):
+- Inspect the user's text and all extracted attachment text for spelling, grammar, punctuation, and obvious word-choice errors.
+- Report each finding with the original phrase, a corrected version, and a brief explanation.
+- For files, include page/slide/sheet/line references when extraction provides them; never invent locations.
+- Separate definite errors from optional style improvements.
+- If no errors are found in the available text, say so clearly.
+- Do not claim to have checked unreadable or unsupported file contents. If extraction is partial, state that limitation.
+- Preserve the user's intended meaning and do not silently rewrite unrelated content.
+`;
+	}
 	let reply = "";
 	const plannerComplexity = resolveModelComplexity(plan);
 	const shouldStreamResponse = streamMode && plannerComplexity !== "complex";
