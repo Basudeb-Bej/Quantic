@@ -1943,39 +1943,57 @@ function ChatPage() {
     const handleAttachmentButtonClick = () => {
         attachmentInputRef.current?.click();
     };
+    const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+    const MAX_ATTACHMENTS_PER_MESSAGE = 6;
+
     const handleAttachmentInputChange = (event) => {
         const files = Array.from(event.target.files || []);
-        if (!files.length) {
-            return;
-        }
+        event.target.value = "";
+        if (!files.length) return;
+
+        const accepted = files.filter((file) => {
+            if (file.size > MAX_ATTACHMENT_BYTES) {
+                showToast(`“${file.name}” is larger than 8 MB. Please choose a smaller file.`, { type: "error" });
+                return false;
+            }
+            return true;
+        });
+
+        if (!accepted.length) return;
 
         void Promise.all(
-            files.map(async (file) => {
+            accepted.map(async (file) => {
                 const key = `${file.name}-${file.size}-${file.lastModified}`;
                 const dataUrl = await readFileAsDataUrl(file);
                 return {
                     key,
                     name: file.name,
                     size: file.size,
-                    type: file.type,
+                    type: file.type || "application/octet-stream",
                     dataUrl,
                 };
             })
         ).then((attachments) => {
+            const uniqueIncoming = attachments.filter((attachment) =>
+                !selectedAttachments.some((existing) => existing.key === attachment.key)
+            );
+            const remainingSlots = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - selectedAttachments.length);
+            if (uniqueIncoming.length > remainingSlots) {
+                showToast(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`, { type: "warning" });
+            }
             setSelectedAttachments((current) => {
                 const nextAttachments = [...current];
-
-                for (const attachment of attachments) {
-                    if (!nextAttachments.some((currentAttachment) => currentAttachment.key === attachment.key)) {
+                for (const attachment of uniqueIncoming.slice(0, remainingSlots)) {
+                    if (!nextAttachments.some((existing) => existing.key === attachment.key)) {
                         nextAttachments.push(attachment);
                     }
                 }
-
-                return nextAttachments;
+                return nextAttachments.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
             });
+        }).catch((error) => {
+            console.error("[ChatPage] attachment read failed", error);
+            showToast("Quantic could not read one of those files. Try another file or a smaller copy.", { type: "error" });
         });
-
-        event.target.value = "";
     };
 
     const handleComposerPaste = (event) => {
@@ -4817,7 +4835,7 @@ function ChatPage() {
                                             rows={1}
                                             value={messageDraft}
                                             autoComplete="off"
-                                            autoCorrect="off"
+                                            autoCorrect="on"
                                             spellCheck="true"
                                             data-lpignore="true"
                                             data-1p-ignore="true"
@@ -5073,7 +5091,7 @@ function ChatPage() {
                                             rows={1}
                                             value={messageDraft}
                                             autoComplete="off"
-                                            autoCorrect="off"
+                                            autoCorrect="on"
                                             spellCheck="true"
                                             data-lpignore="true"
                                             data-1p-ignore="true"

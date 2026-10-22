@@ -1,7 +1,110 @@
 // back-end/services/emailService.js
+const nodemailer = require("nodemailer");
 const EMAILJS_ENDPOINT = "https://api.emailjs.com/api/v1.0/email/send";
 const EMAILJS_TIMEOUT_MS = Number(process.env.EMAILJS_TIMEOUT_MS || 15000);
-const APP_URL = process.env.APP_URL || "http://localhost:5173";
+const APP_URL = process.env.APP_URL || (process.env.NODE_ENV === "production"
+	? "https://quantic-nu.vercel.app"
+	: "http://localhost:5173");
+
+// Production defaults to authenticated SMTP. EmailJS remains available for local
+// development or an explicitly selected provider, but neither provider can
+// guarantee Gmail inbox placement without correct sender-domain authentication.
+const getEmailProvider = () =>
+	String(process.env.EMAIL_PROVIDER || "emailjs")
+		.trim()
+		.toLowerCase();
+
+const sendWithSmtp = async (templateKey, templateParams) => {
+	const host = String(process.env.SMTP_HOST || "").trim();
+	const user = String(process.env.SMTP_USER || "").trim();
+	const pass = String(process.env.SMTP_PASS || "");
+	const fromEmail = String(process.env.SMTP_FROM_EMAIL || "").trim();
+	const fromName = String(process.env.SMTP_FROM_NAME || "Quantic").trim();
+	const port = Number(process.env.SMTP_PORT || 587);
+	const secure = String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || port === 465;
+
+	const missing = [
+		["SMTP_HOST", host],
+		["SMTP_USER", user],
+		["SMTP_PASS", pass],
+		["SMTP_FROM_EMAIL", fromEmail],
+	].filter(([, value]) => !value).map(([name]) => name);
+
+	if (missing.length) {
+		throw new Error(`SMTP email provider is not configured. Missing: ${missing.join(", ")}`);
+	}
+
+	const recipient = normalizeRecipient(templateParams?.to_email);
+	if (!recipient) throw new Error("Recipient email is required.");
+
+	const subject = String(templateParams?.subject || "Message from Quantic");
+	const title = String(templateParams?.title || subject);
+	const preheader = String(templateParams?.preheader || "");
+	const name = String(templateParams?.name || "there");
+	const intro = String(templateParams?.intro || "");
+	const otp = String(templateParams?.otp || "");
+	const appUrl = String(templateParams?.app_url || APP_URL);
+	const isFeedback = templateKey === "general" && templateParams?.feedback_display === "block";
+	const isWelcome = templateKey === "general" && templateParams?.welcome_display === "block";
+
+	let contentHtml = "";
+	let contentText = "";
+
+	if (otp) {
+		const steps = [templateParams?.step_1, templateParams?.step_2, templateParams?.step_3]
+			.map((step) => String(step || "").trim()).filter(Boolean);
+		contentHtml = `
+			<p>Hello ${escapeHtml(name)},</p>
+			<p>${escapeHtml(intro)}</p>
+			<div style="margin:24px 0;padding:18px;text-align:center;background:#f3f4f6;border-radius:12px;font-size:30px;font-weight:700;letter-spacing:8px;color:#111827">${escapeHtml(otp)}</div>
+			<p>This code is time-limited. If you did not request it, you can ignore this email.</p>
+			${steps.length ? `<ol>${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>` : ""}
+			<p><a href="${escapeHtml(appUrl)}">Open Quantic</a></p>`;
+		contentText = [`Hello ${name},`, intro, `Verification code: ${otp}`, "This code is time-limited. If you did not request it, ignore this email.", ...steps, appUrl].filter(Boolean).join("\n\n");
+	} else if (isFeedback) {
+		const feedback = String(templateParams?.fb_message_html || "");
+		contentHtml = `<p>New feedback from ${escapeHtml(templateParams?.fb_name || "Unknown")} (${escapeHtml(templateParams?.fb_email || "Unknown")}).</p><p>Topics: ${escapeHtml(templateParams?.fb_topics || "General")}</p><div style="white-space:normal;border:1px solid #ddd;padding:16px;border-radius:8px">${feedback}</div>`;
+		contentText = [`Feedback from: ${templateParams?.fb_name || "Unknown"}`, `Email: ${templateParams?.fb_email || "Unknown"}`, `Topics: ${templateParams?.fb_topics || "General"}`, feedback.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]*>/g, "")].join("\n\n");
+	} else if (isWelcome) {
+		contentHtml = `<p>Hello ${escapeHtml(name)},</p><p>Your Quantic account is ready. You can now start chatting, exploring ideas, and working with your files.</p><p><a href="${escapeHtml(appUrl)}">Open Quantic</a></p>`;
+		contentText = `Hello ${name},\n\nYour Quantic account is ready.\n\nOpen Quantic: ${appUrl}`;
+	} else {
+		contentHtml = `<p>Hello ${escapeHtml(name)},</p><p>${escapeHtml(preheader || intro || title)}</p>`;
+		contentText = [`Hello ${name},`, preheader || intro || title].join("\n\n");
+	}
+
+	const transporter = nodemailer.createTransport({
+		host,
+		port,
+		secure,
+		auth: { user, pass },
+		connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 10000),
+		greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 10000),
+		socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 15000),
+	});
+
+	const result = await transporter.sendMail({
+		from: { name: fromName, address: fromEmail },
+		to: recipient,
+		subject,
+		text: contentText,
+		html: `<!doctype html><html><body style="margin:0;padding:24px;background:#f6f7fb;font-family:Arial,sans-serif;color:#1f2937"><div style="max-width:600px;margin:0 auto;background:#fff;padding:28px;border-radius:14px"><div style="font-size:20px;font-weight:700;margin-bottom:20px">Quantic</div><h1 style="font-size:22px">${escapeHtml(title)}</h1>${preheader ? `<div style="color:#6b7280;font-size:13px;margin-bottom:20px">${escapeHtml(preheader)}</div>` : ""}${contentHtml}<hr style="border:0;border-top:1px solid #e5e7eb;margin-top:28px"><p style="color:#6b7280;font-size:12px">This message was sent by Quantic. Email delivery depends on the receiving provider's filtering and sender authentication.</p></div></body></html>`,
+	});
+
+	console.info("[Email SMTP] Send request accepted", {
+		template: templateKey,
+		to: maskEmail(recipient),
+		messageId: result.messageId,
+		accepted: Array.isArray(result.accepted) ? result.accepted.length : 0,
+		rejected: Array.isArray(result.rejected) ? result.rejected.length : 0,
+	});
+
+	if (Array.isArray(result.rejected) && result.rejected.length) {
+		throw new Error("SMTP server rejected one or more email recipients.");
+	}
+
+	return { ok: true, messageId: result.messageId };
+};
 
 const getConfig = () => {
 	const config = {
@@ -44,6 +147,12 @@ const maskEmail = (value) => {
 };
 
 const sendWithEmailJs = async (templateKey, templateParams) => {
+	if (getEmailProvider() === "smtp") {
+		return sendWithSmtp(templateKey, templateParams);
+	}
+	if (getEmailProvider() !== "emailjs") {
+		throw new Error('Invalid EMAIL_PROVIDER. Use "smtp" or "emailjs".');
+	}
 	if (typeof fetch !== "function") {
 		throw new Error("Email service needs Node.js 18 or newer (global fetch).");
 	}
