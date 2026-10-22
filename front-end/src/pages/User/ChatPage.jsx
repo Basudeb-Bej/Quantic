@@ -3535,6 +3535,7 @@ function ChatPage() {
 
         await submitChatMessage(sourceMessage.content, {
             conversation: messages.slice(0, messageIndex),
+            attachments: normalizeMessageAttachments(sourceMessage.attachments),
             appendUserToTranscript: false,
             assistantMessageIndex: messageIndex,
             regenerate: true,
