@@ -3077,11 +3077,15 @@ function ChatPage() {
         try {
             const userId = auth?.id ? String(auth.id) : null;
             const activeThreadId = isLoggedIn ? currentThreadId : "";
+            const requestId = window.crypto?.randomUUID?.() || `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
             const res = await fetch(`${apiBaseUrl}/api/chat`, {
                 method: "POST",
+                cache: "no-store",
                 credentials: auth ? "include" : "omit",
                 headers: {
                     "Content-Type": "application/json",
+                    "Cache-Control": "no-cache",
+                    "X-Quantic-Request-Id": requestId,
                     ...(userId ? { "x-user-id": userId } : {}),
                     ...(activeThreadId ? { "x-chat-thread-id": activeThreadId } : {}),
                 },
@@ -3658,6 +3662,8 @@ function ChatPage() {
 
             try {
                 const response = await fetch(`${apiBaseUrl}/api/chat/history`, {
+                    cache: "no-store",
+                    headers: { "Cache-Control": "no-cache" },
                     credentials: "include",
                 });
 
@@ -3695,6 +3701,8 @@ function ChatPage() {
                 setCurrentThreadId(selectedThread.id);
 
                 const threadResponse = await fetch(`${apiBaseUrl}/api/chat/history/${selectedThread.id}`, {
+                    cache: "no-store",
+                    headers: { "Cache-Control": "no-cache" },
                     credentials: "include",
                 });
 
