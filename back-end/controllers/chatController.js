@@ -2363,7 +2363,7 @@ async function handleChat(req, res) {
 	// Image questions must use a vision-capable model; the normal chat model
 	// may accept only text, in which case OCR alone cannot answer scene questions.
 	const hasImageAttachments = Array.isArray(attachments) && attachments.some(isImageAttachment);
-	const visionModel = normalizeText(process.env.GROQ_VISION_MODEL) || "qwen/qwen3.6-27b";
+	const visionModel = normalizeText(process.env.GROQ_VISION_MODEL) || "qwen/qwen3.8-27b";
 	const model = hasImageAttachments
 		? visionModel
 		: configuredChatModel || selectModel(normalizedMessage, plan.intent, resolveModelComplexity(plan));
