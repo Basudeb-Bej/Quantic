@@ -10,7 +10,7 @@ const APP_URL = process.env.APP_URL || (process.env.NODE_ENV === "production"
 // development or an explicitly selected provider, but neither provider can
 // guarantee Gmail inbox placement without correct sender-domain authentication.
 const getEmailProvider = () =>
-	String(process.env.EMAIL_PROVIDER || (process.env.NODE_ENV === "production" ? "smtp" : "emailjs"))
+	String(process.env.EMAIL_PROVIDER || "emailjs")
 		.trim()
 		.toLowerCase();
 
