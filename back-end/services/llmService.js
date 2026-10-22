@@ -952,17 +952,6 @@ const buildChatMessages = ({ prompt, profile, options = {} }) => {
   const systemMessages = buildSystemMessages(profile, options);
   const history = Array.isArray(options?.messages) ? options.messages : null;
 
-  if (history && history.length) {
-    const cleaned = history
-      .filter((entry) => entry && typeof entry.content === "string" && entry.content.trim())
-      .filter((entry) => entry.role === "user" || entry.role === "assistant")
-      .map((entry) => ({ role: entry.role, content: entry.content }));
-
-    if (cleaned.length) {
-      return [...systemMessages, ...cleaned];
-    }
-  }
-
   // OCR is useful for text in a picture, but it cannot answer visual questions
   // such as counting people or identifying objects. Pass the original image data
   // to a vision-capable model as multimodal user content as well.
@@ -972,21 +961,29 @@ const buildChatMessages = ({ prompt, profile, options = {} }) => {
         .slice(0, 3)
     : [];
 
-  if (visionImages.length) {
-    const content = [{ type: "text", text: prompt }];
-    for (const image of visionImages) {
-      content.push({
-        type: "image_url",
-        image_url: { url: image.dataUrl, detail: "auto" },
-      });
+  const currentUserContent = visionImages.length
+    ? [
+        { type: "text", text: prompt },
+        ...visionImages.map((image) => ({
+          type: "image_url",
+          image_url: { url: image.dataUrl, detail: "auto" },
+        })),
+      ]
+    : prompt;
+
+  if (history && history.length) {
+    const cleaned = history
+      .filter((entry) => entry && typeof entry.content === "string" && entry.content.trim())
+      .filter((entry) => entry.role === "user" || entry.role === "assistant")
+      .map((entry) => ({ role: entry.role, content: entry.content }));
+
+    if (cleaned.length) {
+      // Do not let the history fast-path discard the current turn's images.
+      return [...systemMessages, ...cleaned, { role: "user", content: currentUserContent }];
     }
-    return [...systemMessages, {
-      role: "user",
-      content,
-    }];
   }
 
-  return [...systemMessages, { role: "user", content: prompt }];
+  return [...systemMessages, { role: "user", content: currentUserContent }];
 };
 
 const buildChatRequest = ({ prompt, stream, model, maxTokens, profile, options = {}, signal = null }) => {
