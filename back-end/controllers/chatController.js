@@ -2455,6 +2455,7 @@ PROOFREADING TASK (only because the user explicitly requested it):
 			visionImages: hasImageAttachments
 				? attachments.filter(isImageAttachment).slice(0, 3).map((attachment) => ({ name: attachment.name, dataUrl: attachment.dataUrl }))
 				: [],
+			visionOnly: hasImageAttachments,
 		});
 		reply = buildSourcesMarker(extractWebSources(webContext)) + sanitizeCitationFormatting(reply, countWebContextSources(webContext));
 		res.status(200).end(reply);
@@ -2482,6 +2483,7 @@ PROOFREADING TASK (only because the user explicitly requested it):
 		visionImages: hasImageAttachments
 			? attachments.filter(isImageAttachment).slice(0, 3).map((attachment) => ({ name: attachment.name, dataUrl: attachment.dataUrl }))
 			: [],
+		visionOnly: hasImageAttachments,
 	});
 	reply = sourcesMarker + sanitizeCitationFormatting(reply, countWebContextSources(webContext));
 	if (shouldPersistHistory && conversationThread?._id) {
