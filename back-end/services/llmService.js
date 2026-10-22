@@ -814,6 +814,37 @@ const resolveModelChain = async (profile, requestedModel) => {
   return preferences.length ? preferences : [FALLBACK_MODEL];
 };
 
+// Images must never fall back to a text-only model: that produces misleading
+// "I cannot access the image" answers or repeated API errors. Keep this chain
+// restricted to known vision-capable Groq models only.
+const resolveVisionModelChain = async (requestedModel) => {
+  const configured = normalizeText(requestedModel);
+  const preferences = [
+    configured,
+    "qwen/qwen3.8-27b",
+  ].filter((model, index, list) => model && list.indexOf(model) === index);
+  const available = await fetchAvailableModels();
+
+  const usable = preferences.filter((model) => {
+    if (!isModelUsable(model)) return false;
+    if (available && !available.has(model)) {
+      markModelDead(model, "vision model not listed by GET /v1/models");
+      return false;
+    }
+    return true;
+  });
+
+  if (usable.length) return usable;
+  if (!available) {
+    // If the model-list probe itself failed, try the documented vision model.
+    return ["qwen/qwen3.8-27b"];
+  }
+
+  const error = new Error("No available vision-capable model is configured. Set GROQ_VISION_MODEL to an active Groq vision model.");
+  error.code = "QUANTIC_VISION_MODEL_UNAVAILABLE";
+  throw error;
+};
+
 const createTurnBudget = (limit = MAX_TURN_TOKENS) => ({
   limit,
   spent: 0,
@@ -1632,7 +1663,7 @@ const generateGroqResponse = async (prompt, query, model, options = {}) => {
   let lastFailure = null;
 
   try {
-    const models = await resolveModelChain(profile, model);
+    const models = options?.visionOnly ? await resolveVisionModelChain(model) : await resolveModelChain(profile, model);
     const maxTokens = resolveMaxTokens(profile);
 
     const { response, model: usedModel } = await requestWithModelChain({
