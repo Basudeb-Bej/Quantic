@@ -1972,6 +1972,14 @@ const persistAfterReply = async ({ message, reply, userId, threadId, regenerate 
 };
 
 async function handleChat(req, res) {
+	// Chat responses must never be reused by a browser, CDN, or intermediary cache.
+	// This also makes stale-response reports diagnosable in production logs.
+	const requestId = normalizeText(req.headers["x-quantic-request-id"]) || require("crypto").randomUUID();
+	res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+	res.setHeader("Pragma", "no-cache");
+	res.setHeader("Expires", "0");
+	res.setHeader("X-Quantic-Request-Id", requestId);
+
 	const { message, conversation, attachments, timeZone, userTime, regenerate = false, assistantMessageIndex = null } = req.body || {};
 	const editMessageIndex = Number.isInteger(req.body?.editMessageIndex) ? req.body.editMessageIndex : null;
 	const streamMode = String(req.query.stream || req.headers["x-stream-mode"] || "true").toLowerCase() !== "false";
@@ -1993,6 +2001,14 @@ async function handleChat(req, res) {
 	const incomingThreadId = normalizeThreadId(req.headers["x-chat-thread-id"]);
 	let conversationThread = null;
 
+	logger.info("[chatController] request received", {
+		requestId,
+		messageLength: normalizedMessage.length,
+		attachmentCount: Array.isArray(attachments) ? attachments.length : 0,
+		attachmentNames: Array.isArray(attachments) ? attachments.slice(0, 10).map((item) => normalizeText(item?.name).slice(0, 120)) : [],
+		threadId: normalizeThreadId(req.headers["x-chat-thread-id"]),
+		regenerate: Boolean(regenerate),
+	});
 	logger.info("[chatController] auth debug", {
 		authHeaderUserId: normalizeText(req.headers["x-user-id"]),
 		hasAuth: Boolean(req.auth?.userId),
@@ -2140,7 +2156,17 @@ async function handleChat(req, res) {
 	let activeConversation = normalizedConversation;
 	if (conversationThread?._id && !regenerate && editMessageIndex === null) {
 		activeConversation = await fetchThreadMessages(conversationThread)
-			.then((messages) => messages.slice(-10))
+			.then((messages) => {
+				const history = messages.slice(-10);
+				// startConversationHistory stores the current user turn before generation.
+				// The current request is already supplied separately as the query, so remove
+				// that final duplicate turn from history to avoid stale/duplicated context.
+				const last = history[history.length - 1];
+				if (last?.role === "user" && normalizeText(last.content) === normalizedMessage) {
+					history.pop();
+				}
+				return history;
+			})
 			.catch(() => normalizedConversation);
 	}
 
@@ -2384,6 +2410,14 @@ async function handleChat(req, res) {
 		/\b(?:spell(?:ing)?[ -]?(?:check|mistakes?|errors?)|typos?|proofread(?:ing)?|grammar(?:[ -]?(?:check|mistakes?|errors?))?|punctuation(?:[ -]?(?:check|mistakes?|errors?))?|correct (?:the )?(?:spelling|grammar|english|punctuation)|check (?:my |this |the |these )?(?:spelling|grammar|writing|text|document|file)|review (?:my |this |the |these )?(?:writing|text|document|file)|find (?:and )?fix (?:the )?(?:mistakes?|errors?)|language errors?)\b/i.test(normalizedMessage);
 
 	let prompt = await buildPrompt(normalizedMessage, promptOptions);
+	prompt += `
+
+LATEST-TURN PRIORITY:
+- Answer the latest user request in this request, not a previous turn.
+- Treat the current user message and any successfully extracted attachment contents as the primary task.
+- Use earlier conversation only when it helps interpret the latest request; never repeat a prior answer merely because it appears in history.
+- If an attachment was provided, explicitly use its extracted contents. If extraction failed or produced no text, state that instead of guessing.
+`;
 	if (proofreadingRequested) {
 		prompt += `
 
