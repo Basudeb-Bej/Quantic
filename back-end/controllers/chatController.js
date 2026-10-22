@@ -2381,7 +2381,7 @@ async function handleChat(req, res) {
 	logger.info("[chatController] plan", { userId, plan, model, streamMode });
 
 	const proofreadingRequested =
-		/\b(spell(?:ing)?[ -]?check|spelling errors?|typos?|proofread(?:ing)?|grammar(?: check| errors?)?|correct (?:the )?(?:spelling|grammar|english)|check (?:my |this |the )?(?:spelling|grammar|writing)|language errors?)\b/i.test(normalizedMessage);
+		/\b(?:spell(?:ing)?[ -]?(?:check|mistakes?|errors?)|typos?|proofread(?:ing)?|grammar(?:[ -]?(?:check|mistakes?|errors?))?|punctuation(?:[ -]?(?:check|mistakes?|errors?))?|correct (?:the )?(?:spelling|grammar|english|punctuation)|check (?:my |this |the |these )?(?:spelling|grammar|writing|text|document|file)|review (?:my |this |the |these )?(?:writing|text|document|file)|find (?:and )?fix (?:the )?(?:mistakes?|errors?)|language errors?)\b/i.test(normalizedMessage);
 
 	let prompt = await buildPrompt(normalizedMessage, promptOptions);
 	if (proofreadingRequested) {
