@@ -1831,11 +1831,22 @@ const LIVE_REQUEST_PHRASE = /\b(tell me|show me|give me|let me know|i want to kn
 
 // Lightweight typo normalization for high-value live-search entities/roles.
 // Keep the user's original message for display; use this only for routing/search.
-const normalizeLiveSearchTypos = (value) => String(value ?? "")
-	.replace(/\bchief\s+men(?:e|i)ster\b/gi, "chief minister")
-	.replace(/\bchief\s+min(?:e|i)ster\b/gi, "chief minister")
-	.replace(/\bwest\s+bangal\b/gi, "West Bengal")
-	.replace(/\bwest\s+bengal\b/gi, "West Bengal");
+const normalizeLiveSearchTypos = (value) => {
+	let normalized = String(value ?? "")
+		.replace(/\bchief\s+men(?:e|i)ster\b/gi, "chief minister")
+		.replace(/\bchief\s+min(?:e|i)ster\b/gi, "chief minister")
+		.replace(/\bwest\s+bangal\b/gi, "West Bengal")
+		.replace(/\bwest\s+bengal\b/gi, "West Bengal");
+
+	// Interpret "CM" as Chief Minister only in a state-government context.
+	// Avoid rewriting ordinary uses such as cm (centimetres) or time expressions.
+	const mentionsIndianState = /\b(west\s+bengal|bihar|kerala|gujarat|maharashtra|tamil\s+nadu|punjab|rajasthan|assam|odisha|telangana|karnataka|jharkhand|uttar\s+pradesh|madhya\s+pradesh|goa|tripura|manipur|meghalaya|mizoram|nagaland|sikkim|arunachal\s+pradesh|chhattisgarh|haryana|himachal\s+pradesh|uttarakhand|andhra\s+pradesh|delhi)\b/i.test(normalized);
+	if (mentionsIndianState && /\bcm\b/i.test(normalized) && !/\b\d+(?:\.\d+)?\s*cm\b/i.test(normalized)) {
+		normalized = normalized.replace(/\bcm\b/gi, "chief minister");
+	}
+
+	return normalized;
+};
 
 const LIVE_RECENCY_PATTERNS = [
 	/\b(today|tonight|yesterday|right now|as of (?:now|today)|this (?:week|month|year|season|weekend|morning|evening)|latest|recent(?:ly)?|newest|breaking|just (?:announced|released|happened|launched))\b/i,
