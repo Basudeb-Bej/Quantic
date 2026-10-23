@@ -1557,9 +1557,38 @@ const fetchPagePreview = async (url, deadline) => {
  * Collection: parallel fan-out with early exit
  * ------------------------------------------------------------------------- */
 
+const buildCurrentNewsQuery = (intent) => {
+	const original = normalizeQuery(intent?.query || "");
+	const lower = original.toLowerCase();
+	if (!intent?.news) return original;
+
+	// Prefer a clean, location-focused query for news feeds. Sending the entire
+	// conversational sentence ("today's news in ...?") often produces irrelevant
+	// results from general web indexes instead of local headlines.
+	const locations = [
+		"West Bengal", "New Delhi", "Delhi", "Kolkata", "Mumbai", "Chennai", "Bengaluru",
+		"Hyderabad", "Jharkhand", "Bihar", "Odisha", "India", "Jhargram", "Jhargram",
+		"United States", "United Kingdom"
+	];
+	const found = locations
+		.map((name) => ({ name, index: lower.indexOf(name.toLowerCase()) }))
+		.filter((item) => item.index >= 0)
+		.sort((a, b) => b.name.length - a.name.length)[0];
+
+	if (found) return `${found.name} latest news today`;
+
+	return original
+		.replace(/\bwhat(?:'s| is)\s+(?:the\s+)?/i, "")
+		.replace(/\btoday'?s\s+/i, "")
+		.replace(/\b(headlines?|news)\s+(?:in|from|about)\s+/i, "$1 ")
+		.replace(/[?!.]+$/g, "")
+		.trim() || original;
+};
+
 const buildSearchLanes = (variants, intent) => {
 	const lanes = [];
 	const first = variants[0];
+	const newsQuery = buildCurrentNewsQuery(intent);
 
 	// The higher-signal providers go first, so a concurrency limit never starves them.
 	if (first && getTavilyKey()) {
@@ -1567,7 +1596,11 @@ const buildSearchLanes = (variants, intent) => {
 	}
 
 	if (first && NEWS_RSS_ENABLED && (intent.news || intent.timeSensitive)) {
-		lanes.push({ variant: first, provider: "google-news", isPrimary: true });
+		lanes.push({
+			variant: intent.news ? newsQuery : first,
+			provider: "google-news",
+			isPrimary: true,
+		});
 	}
 
 	variants.forEach((variant, index) => {
