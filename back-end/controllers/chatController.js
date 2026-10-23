@@ -1834,7 +1834,10 @@ const LIVE_RECENCY_PATTERNS = [
 	// "current" also means electric current, so leave the obvious physics phrases alone.
 	/\bcurrent(?:ly)?\b(?!\s+(?:in\s+a\b|flow|density|source|through|electricity|transformer|meter|carrying))/i,
 	/\b(?:live|ongoing)\s+(?:score|scores|updates?|news|price|rate|stream|match|coverage|results?)\b/i,
-	/\b20(?:2[5-9]|3\d)\b/,
+	// An explicit year/date needs retrieval too, but the prompt must preserve that historical scope.
+	/\b(?:18|19|20)\d{2}\b/,
+	/\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,?\s+(?:18|19|20)\d{2})?\b/i,
+	/\b\d{1,2}[/-]\d{1,2}[/-](?:18|19|20)\d{2}\b/,
 ];
 const LIVE_NEWS_PATTERN = /\b(news|headlines?|top stories|breaking)\b/i;
 const LIVE_RANKING_PATTERN = /\b(richest|wealthiest|net\s?worth|billionaires?|highest[- ]paid|most valuable (?:company|brand|player)|market\s?cap(?:italization)?|leaderboard|largest economy|most followed|most subscribed|(?:world|global|fifa|icc|atp|wta|qs|nirf|university|college)\s+rankings?)\b/i;
@@ -2323,6 +2326,8 @@ async function handleChat(req, res) {
 		&& !/\b(?:at|by|from|until|before|after)\s+\d+\s*pm\b/i.test(normalizedMessage);
 	const hasElectionResultSignal = /\b(election|elections|result|results|winner|won|counting|vote\s+share|votes?)\b/i.test(normalizedMessage)
 		&& /\b(assembly\s+constituency|constituency|mla|mp|member\s+of\s+legislative\s+assembly|member\s+of\s+parliament|minister|mayor|ward|district|west\s+bengal|india)\b/i.test(normalizedMessage);
+	// Office-holder questions are time-sensitive even when the user does not type
+	// "current". Explicit years/dates are also searched, while preserving that scope.
 	const isPublicOfficeQuestion = (hasPublicOfficeEntitySignal || hasPublicPmAliasSignal) && (hasOfficeQuestionSignal || hasCurrentSignal);
 	const isPublicOfficeJoiningDateQuestion =
 		/\b(cm|chief\s+minister|prime\s+minister|president|governor|minister)\b/i.test(normalizedMessage)
@@ -2418,6 +2423,12 @@ async function handleChat(req, res) {
 	let prompt = await buildPrompt(normalizedMessage, promptOptions);
 	prompt += `
 
+TEMPORAL ACCURACY AND WEB GROUNDING:
+- Current date/time reference: ${new Date().toISOString()} (UTC). Do not present stale knowledge, old office holders, old prices, or previous-year information as current.
+- For factual questions about changing facts, public office holders, events, prices, rankings, releases, laws/policies, or news, prioritize retrieved web evidence over model memory.
+- If the user explicitly names a year, date, or time period, answer for that exact requested period. Do not replace a historical question with today's answer or silently treat a past year as current.
+- If web retrieval fails or provides no reliable evidence, say that current/period-specific information could not be verified; do not invent a result or imply a search succeeded.
+- Distinguish publication date from the date an event or fact applies to, and state the relevant date when it matters.
 LATEST-TURN PRIORITY:
 - Answer the latest user request in this request, not a previous turn.
 - Treat the current user message and any successfully extracted attachment contents as the primary task.
