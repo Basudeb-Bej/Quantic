@@ -20,6 +20,7 @@ import {
     joinVoiceTranscript,
     rememberVoiceLanguage,
     speakWithAI,
+    cancelSpeechSynthesis,
 } from "../../services/voiceService";
 import { useToasts } from "../../hooks/useToasts";
 
@@ -2342,11 +2343,7 @@ function ChatPage() {
         }
 
         if (hasSpeechSynthesis) {
-            try {
-                window.speechSynthesis.cancel();
-            } catch {
-                // ignore
-            }
+            cancelSpeechSynthesis();
         }
 
         speechReadAloudRef.current.status = "idle";
@@ -2545,7 +2542,6 @@ function ChatPage() {
 
         const shouldResumeListening = Boolean(resumeListening || voiceModeEnabledRef.current);
         const isManualPlayback = !shouldResumeListening;
-        const playbackRequestId = ++voicePlaybackRequestRef.current;
 
         if (shouldResumeListening) {
             stopVoiceListening({ keepVoiceMode: true });
@@ -2554,6 +2550,7 @@ function ChatPage() {
         }
 
         stopVoicePlayback();
+        const playbackRequestId = ++voicePlaybackRequestRef.current;
 
         try {
             const audio = await speakWithAI(
