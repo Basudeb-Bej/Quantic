@@ -1840,6 +1840,7 @@ const LIVE_RECENCY_PATTERNS = [
 	/\b\d{1,2}[/-]\d{1,2}[/-](?:18|19|20)\d{2}\b/,
 ];
 const LIVE_NEWS_PATTERN = /\b(news|headlines?|top stories|breaking)\b/i;
+const LIVE_DYNAMIC_FACT_PATTERN = /\b(population|demograph(?:ic|ics)|GDP|inflation|unemployment|statistics|statistic|survey results|census|life expectancy|exchange rate|price|cost of living|minimum wage|tax rate|interest rate|policy|law|regulation|president|prime minister|chief minister|governor|mayor|CEO|chairman|head coach|captain|version|release|availability|opening hours|admission dates?|application deadline|exam date|result date|election result|weather|forecast|schedule|timetable)\b/i;
 const LIVE_RANKING_PATTERN = /\b(richest|wealthiest|net\s?worth|billionaires?|highest[- ]paid|most valuable (?:company|brand|player)|market\s?cap(?:italization)?|leaderboard|largest economy|most followed|most subscribed|(?:world|global|fifa|icc|atp|wta|qs|nirf|university|college)\s+rankings?)\b/i;
 const LIVE_ROLE_HOLDER_PATTERN = /\bwho\s+(?:is|'s)\s+(?:the\s+)?(?:current\s+|present\s+|new\s+)?(?:ceo|cto|cfo|coo|chairman|head coach|coach|captain|skipper)\b/i;
 const LIVE_SPORTS_PATTERN = /\b(?:(?:cricket|football|ipl|nba|nfl|epl|tennis|match|game)\s+(?:live\s+)?scores?|scorecard|fixtures?|standings|points table|who (?:won|is winning|will win)|match (?:today|result|tonight)|box office|release date)\b/i;
@@ -1859,6 +1860,7 @@ const isLiveInfoQuestion = (text) => {
 
 	return LIVE_RECENCY_PATTERNS.some((pattern) => pattern.test(value))
 		|| LIVE_NEWS_PATTERN.test(value)
+		|| LIVE_DYNAMIC_FACT_PATTERN.test(value)
 		|| LIVE_RANKING_PATTERN.test(value)
 		|| LIVE_ROLE_HOLDER_PATTERN.test(value)
 		|| LIVE_SPORTS_PATTERN.test(value);
