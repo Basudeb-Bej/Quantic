@@ -2327,13 +2327,14 @@ async function handleChat(req, res) {
 		plan.useWeb = false;
 		plan.useRAG = false;
 	}
+	// Normalize common typos before any live-search routing checks.
+	const routingMessage = normalizeLiveSearchTypos(normalizedMessage);
 	// Force web-grounding for time-sensitive current office-holder questions.
 	const hasCurrentSignal = /\b(current|present|latest|as of|right now|now|20\d{2})\b/i.test(routingMessage);
 	const hasFinanceSignal = /\b(gold|silver|crude\s+oil|oil\s+price|share\s+price|stock\s+price|stock\s+market|market\s+price|crypto|bitcoin|ethereum|nifty|sensex|exchange\s+rate|forex|currency\s+rate|usd\s+to\s+inr|inr\s+to\s+usd|gold\s+price|gold\s+rate|commodity\s+price)\b/i.test(routingMessage);
-	const routingMessage = normalizeLiveSearchTypos(normalizedMessage);
 	const hasOfficeQuestionSignal = /\b(who is|who's|who\s+is|what is|name of|posted as|serving as|represents|holds)\b/i.test(routingMessage);
 	const hasPublicOfficeEntitySignal = /\b(mla|mp|member\s+of\s+legislative\s+assembly|member\s+of\s+parliament|assembly\s+constituency|legislative\s+assembly|legislative\s+council|cm|chief\s+minister|prime\s+minister|pm|president|governor|minister|ias|ips|district\s+magistrate|district\s+collector|collector|dm|superintendent\s+of\s+police|sp|s\.p\.|police\s+superintendent)\b/i.test(routingMessage);
-	const hasPublicPmAliasSignal = /\bpm\b/i.test(normalizedMessage)
+	const hasPublicPmAliasSignal = /\bpm\b/i.test(routingMessage)
 		&& !/^\s*\d+\s*pm\b/i.test(normalizedMessage)
 		&& !/\b(?:at|by|from|until|before|after)\s+\d+\s*pm\b/i.test(normalizedMessage);
 	const hasElectionResultSignal = /\b(election|elections|result|results|winner|won|counting|vote\s+share|votes?)\b/i.test(routingMessage)
