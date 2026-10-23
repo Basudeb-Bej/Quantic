@@ -2328,16 +2328,16 @@ async function handleChat(req, res) {
 		plan.useRAG = false;
 	}
 	// Force web-grounding for time-sensitive current office-holder questions.
-	const hasCurrentSignal = /\b(current|present|latest|as of|right now|now|20\d{2})\b/i.test(normalizedMessage);
-	const hasFinanceSignal = /\b(gold|silver|crude\s+oil|oil\s+price|share\s+price|stock\s+price|stock\s+market|market\s+price|crypto|bitcoin|ethereum|nifty|sensex|exchange\s+rate|forex|currency\s+rate|usd\s+to\s+inr|inr\s+to\s+usd|gold\s+price|gold\s+rate|commodity\s+price)\b/i.test(normalizedMessage);
+	const hasCurrentSignal = /\b(current|present|latest|as of|right now|now|20\d{2})\b/i.test(routingMessage);
+	const hasFinanceSignal = /\b(gold|silver|crude\s+oil|oil\s+price|share\s+price|stock\s+price|stock\s+market|market\s+price|crypto|bitcoin|ethereum|nifty|sensex|exchange\s+rate|forex|currency\s+rate|usd\s+to\s+inr|inr\s+to\s+usd|gold\s+price|gold\s+rate|commodity\s+price)\b/i.test(routingMessage);
 	const routingMessage = normalizeLiveSearchTypos(normalizedMessage);
 	const hasOfficeQuestionSignal = /\b(who is|who's|who\s+is|what is|name of|posted as|serving as|represents|holds)\b/i.test(routingMessage);
 	const hasPublicOfficeEntitySignal = /\b(mla|mp|member\s+of\s+legislative\s+assembly|member\s+of\s+parliament|assembly\s+constituency|legislative\s+assembly|legislative\s+council|cm|chief\s+minister|prime\s+minister|pm|president|governor|minister|ias|ips|district\s+magistrate|district\s+collector|collector|dm|superintendent\s+of\s+police|sp|s\.p\.|police\s+superintendent)\b/i.test(routingMessage);
 	const hasPublicPmAliasSignal = /\bpm\b/i.test(normalizedMessage)
 		&& !/^\s*\d+\s*pm\b/i.test(normalizedMessage)
 		&& !/\b(?:at|by|from|until|before|after)\s+\d+\s*pm\b/i.test(normalizedMessage);
-	const hasElectionResultSignal = /\b(election|elections|result|results|winner|won|counting|vote\s+share|votes?)\b/i.test(normalizedMessage)
-		&& /\b(assembly\s+constituency|constituency|mla|mp|member\s+of\s+legislative\s+assembly|member\s+of\s+parliament|minister|mayor|ward|district|west\s+bengal|india)\b/i.test(normalizedMessage);
+	const hasElectionResultSignal = /\b(election|elections|result|results|winner|won|counting|vote\s+share|votes?)\b/i.test(routingMessage)
+		&& /\b(assembly\s+constituency|constituency|mla|mp|member\s+of\s+legislative\s+assembly|member\s+of\s+parliament|minister|mayor|ward|district|west\s+bengal|india)\b/i.test(routingMessage);
 	// Office-holder questions are time-sensitive even when the user does not type
 	// "current". Explicit years/dates are also searched, while preserving that scope.
 	const isPublicOfficeQuestion = (hasPublicOfficeEntitySignal || hasPublicPmAliasSignal) && (hasOfficeQuestionSignal || hasCurrentSignal);
@@ -2372,7 +2372,7 @@ async function handleChat(req, res) {
 	}
 	// Things that change (richest person, net worth, news, scores, CEOs, latest versions) need live data even
 	// when the planner did not flag them. Only ever turns web ON, never touches tools, coding or RAG.
-	if (!plan.useWeb && (!plan.tool || plan.tool === "none") && plan.intent !== "coding" && isLiveInfoQuestion(normalizedMessage)) {
+	if (!plan.useWeb && (!plan.tool || plan.tool === "none") && plan.intent !== "coding" && isLiveInfoQuestion(routingMessage)) {
 		plan.intent = "realtime";
 		plan.useWeb = true;
 	}
