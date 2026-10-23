@@ -1895,6 +1895,7 @@ function ChatPage() {
     const messageInputRef = useRef(null);
     const recognitionRef = useRef(null);
     const voiceAudioRef = useRef(null);
+    const voicePlaybackRequestRef = useRef(0);
     const orbInnerRef = useRef(null);
     const voiceAutoSendTimerRef = useRef(null);
     const voiceRestartTimerRef = useRef(null);
@@ -2322,6 +2323,8 @@ function ChatPage() {
     );
 
     const stopVoicePlayback = () => {
+        // Invalidate any in-flight TTS request so it cannot start playing after Stop is clicked.
+        voicePlaybackRequestRef.current += 1;
         const currentAudio = voiceAudioRef.current;
         const hasSpeechSynthesis = typeof window !== "undefined" && "speechSynthesis" in window;
 
@@ -2542,6 +2545,7 @@ function ChatPage() {
 
         const shouldResumeListening = Boolean(resumeListening || voiceModeEnabledRef.current);
         const isManualPlayback = !shouldResumeListening;
+        const playbackRequestId = ++voicePlaybackRequestRef.current;
 
         if (shouldResumeListening) {
             stopVoiceListening({ keepVoiceMode: true });
@@ -2568,6 +2572,20 @@ function ChatPage() {
                 { onBoundary: handleSpeechBoundaryPulse }
             );
 
+            // Stop may have been clicked while the TTS request was still pending.
+            if (playbackRequestId !== voicePlaybackRequestRef.current) {
+                if (audio) {
+                    try {
+                        audio.pause();
+                        audio.currentTime = 0;
+                        audio.src = "";
+                    } catch {
+                        // ignore
+                    }
+                }
+                return null;
+            }
+
             if (audio) {
                 voiceAudioRef.current = audio;
             }
@@ -2587,7 +2605,7 @@ function ChatPage() {
     };
 
     const handleReadMessageAloud = async (content, options = {}) => {
-        if (isSpeakingRef.current || speechReadAloudRef.current.status !== "idle") {
+        if (isSpeakingRef.current || manualPlaybackActive || speechReadAloudRef.current.status !== "idle") {
             stopVoicePlayback();
             return;
         }
