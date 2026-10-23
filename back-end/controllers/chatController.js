@@ -2328,6 +2328,7 @@ async function handleChat(req, res) {
 		plan.useRAG = false;
 	}
 	// Normalize common typos before any live-search routing checks.
+	// IMPORTANT: initialize routingMessage before every predicate that reads it (prevents TDZ ReferenceError).
 	const routingMessage = normalizeLiveSearchTypos(normalizedMessage);
 	// Force web-grounding for time-sensitive current office-holder questions.
 	const hasCurrentSignal = /\b(current|present|latest|as of|right now|now|20\d{2})\b/i.test(routingMessage);
