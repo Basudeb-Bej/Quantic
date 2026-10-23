@@ -2426,7 +2426,7 @@ async function handleChat(req, res) {
 	prompt += `
 
 TEMPORAL ACCURACY AND WEB GROUNDING:
-- Current date/time reference: ${new Date().toISOString()} (UTC). Do not present stale knowledge, old office holders, old prices, or previous-year information as current.
+- Current date/time reference for this request: ${buildTimeAndDateReport({ timeZone: clientTimeZone, userTime })}. Use it to interpret relative dates in the user's timezone. Do not present stale knowledge, old office holders, old prices, or previous-year information as current.
 - For factual questions about changing facts, public office holders, events, prices, rankings, releases, laws/policies, or news, prioritize retrieved web evidence over model memory.
 - If the user explicitly names a year, date, or time period, answer for that exact requested period. Do not replace a historical question with today's answer or silently treat a past year as current.
 - If web retrieval fails or provides no reliable evidence, say that current/period-specific information could not be verified; do not invent a result or imply a search succeeded.
