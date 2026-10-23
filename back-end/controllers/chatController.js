@@ -636,21 +636,37 @@ const isLocationCorrectionMessage = (message) => {
 	return /\b(not my (correct )?location|wrong location|that's not (my|where i)|thats not (my|where i)|i('m| am) not (in|from|located in))\b/.test(normalized);
 };
 
-const getTimeOfDayGreeting = (date = new Date()) => {
-	const hour = Number(date?.getHours?.()) || 0;
+const getTimeOfDayGreeting = (date = new Date(), timeZone = "Asia/Kolkata") => {
+	// Use the user timezone rather than the backend server timezone (often UTC).
+	let hour;
+	try {
+		const parts = new Intl.DateTimeFormat("en-GB", {
+			timeZone: timeZone || "Asia/Kolkata",
+			hour: "2-digit",
+			hourCycle: "h23",
+		}).formatToParts(date);
+		hour = Number(parts.find((part) => part.type === "hour")?.value);
+	} catch {
+		const parts = new Intl.DateTimeFormat("en-GB", {
+			timeZone: "Asia/Kolkata",
+			hour: "2-digit",
+			hourCycle: "h23",
+		}).formatToParts(date);
+		hour = Number(parts.find((part) => part.type === "hour")?.value);
+	}
 
 	if (hour < 12) {
 		return "Good morning";
 	}
 
-	if (hour < 18) {
+	if (hour < 17) {
 		return "Good afternoon";
 	}
 
 	return "Good evening";
 };
 
-const buildGreetingReply = () => `${getTimeOfDayGreeting()}. How can I assist you today?`;
+const buildGreetingReply = (timeZone) => `${getTimeOfDayGreeting(new Date(), timeZone || "Asia/Kolkata")}. How can I assist you today?`;
 
 const buildCreatorReply = () => "I was created by Basudeb Bej, the developer behind Quantic AI. I help with writing, coding, learning, and problem-solving.";
 
@@ -2265,7 +2281,7 @@ async function handleChat(req, res) {
 	}
 
 	if (isGreetingMessage(normalizedMessage)) {
-		const reply = buildGreetingReply();
+		const reply = buildGreetingReply(clientTimeZone);
 
 		res.status(200).end(reply);
 
