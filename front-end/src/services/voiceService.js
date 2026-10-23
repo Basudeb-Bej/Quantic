@@ -1,7 +1,11 @@
 //front-end/src/services/voiceService.js
 const getReadableText = (content) => String(content ?? "").trim();
+let activeSpeechRequestId = 0;
 
-const cancelSpeechSynthesis = () => {
+export const cancelSpeechSynthesis = () => {
+	// Invalidate the current chunk chain before cancelling: browsers may fire onend/onerror
+	// for a cancelled utterance, and those handlers must not enqueue the next chunk.
+	activeSpeechRequestId += 1;
 	if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
 	try {
 		window.speechSynthesis.cancel();
@@ -156,17 +160,25 @@ export const speakWithAI = async (content, onStart, onEnd, options = {}) => {
 		return null;
 	}
 
+	// A new playback supersedes any older utterance chain.
+	const requestId = ++activeSpeechRequestId;
 	const detectedLang = detectLanguageFromText(readableText);
 	const preferredLang = options.lang || detectedLang || navigator?.language || "en-US";
 	const voice = await waitForVoices(preferredLang);
+	if (requestId !== activeSpeechRequestId) return null;
 	const resolvedLang = voice?.lang || preferredLang;
 
-	cancelSpeechSynthesis();
+	try {
+		window.speechSynthesis.cancel();
+	} catch {
+		// ignore
+	}
 
 	const chunks = chunkText(readableText);
 	let index = 0;
 
 	const speakNext = () => {
+		if (requestId !== activeSpeechRequestId) return;
 		if (index >= chunks.length) {
 			if (typeof onEnd === "function") onEnd();
 			return;
@@ -185,10 +197,12 @@ export const speakWithAI = async (content, onStart, onEnd, options = {}) => {
 			utterance.onboundary = (event) => options.onBoundary(event);
 		}
 		utterance.onend = () => {
+			if (requestId !== activeSpeechRequestId) return;
 			index += 1;
 			speakNext();
 		};
 		utterance.onerror = () => {
+			if (requestId !== activeSpeechRequestId) return;
 			index += 1;
 			speakNext();
 		};
