@@ -1829,6 +1829,14 @@ const LIVE_SMALL_TALK_START = /^(hi+|hello|hey+|good\s+(?:morning|afternoon|even
 const LIVE_QUESTION_START = /^(who|whom|whose|what|which|when|where|why|how|is|are|was|were|does|do|did|can|could|will|would|has|have|tell|show|give|find|list|name|any|latest|current|today|check|news)\b/i;
 const LIVE_REQUEST_PHRASE = /\b(tell me|show me|give me|let me know|i want to know|i wanna know|do you know|can you (?:tell|find|check|show))\b/i;
 
+// Lightweight typo normalization for high-value live-search entities/roles.
+// Keep the user's original message for display; use this only for routing/search.
+const normalizeLiveSearchTypos = (value) => String(value ?? "")
+	.replace(/\bchief\s+men(?:e|i)ster\b/gi, "chief minister")
+	.replace(/\bchief\s+min(?:e|i)ster\b/gi, "chief minister")
+	.replace(/\bwest\s+bangal\b/gi, "West Bengal")
+	.replace(/\bwest\s+bengal\b/gi, "West Bengal");
+
 const LIVE_RECENCY_PATTERNS = [
 	/\b(today|tonight|yesterday|right now|as of (?:now|today)|this (?:week|month|year|season|weekend|morning|evening)|latest|recent(?:ly)?|newest|breaking|just (?:announced|released|happened|launched))\b/i,
 	// "current" also means electric current, so leave the obvious physics phrases alone.
@@ -1887,15 +1895,16 @@ const resolveWebContext = async ({ message, useWeb, conversation = [] }) => {
 	}
 
 	const normalizedMessage = normalizeText(message);
+	const typoCorrectedMessage = normalizeLiveSearchTypos(normalizedMessage);
 
 	// A follow-up such as "his current networth?" means nothing to a search engine on its own.
 	// Rewrite it into a standalone query from the recent conversation; if that fails for any
 	// reason, search with the original message exactly as before.
-	let searchBase = normalizedMessage;
+	let searchBase = typoCorrectedMessage;
 
-	if (needsQueryRewrite(normalizedMessage, conversation)) {
+	if (needsQueryRewrite(typoCorrectedMessage, conversation)) {
 		try {
-			const rewritten = normalizeText(await rewriteSearchQuery(normalizedMessage, conversation));
+			const rewritten = normalizeText(await rewriteSearchQuery(typoCorrectedMessage, conversation));
 
 			if (rewritten) {
 				searchBase = rewritten;
@@ -2321,8 +2330,9 @@ async function handleChat(req, res) {
 	// Force web-grounding for time-sensitive current office-holder questions.
 	const hasCurrentSignal = /\b(current|present|latest|as of|right now|now|20\d{2})\b/i.test(normalizedMessage);
 	const hasFinanceSignal = /\b(gold|silver|crude\s+oil|oil\s+price|share\s+price|stock\s+price|stock\s+market|market\s+price|crypto|bitcoin|ethereum|nifty|sensex|exchange\s+rate|forex|currency\s+rate|usd\s+to\s+inr|inr\s+to\s+usd|gold\s+price|gold\s+rate|commodity\s+price)\b/i.test(normalizedMessage);
-	const hasOfficeQuestionSignal = /\b(who is|who's|who\s+is|what is|name of|posted as|serving as|represents|holds)\b/i.test(normalizedMessage);
-	const hasPublicOfficeEntitySignal = /\b(mla|mp|member\s+of\s+legislative\s+assembly|member\s+of\s+parliament|assembly\s+constituency|legislative\s+assembly|legislative\s+council|cm|chief\s+minister|prime\s+minister|pm|president|governor|minister|ias|ips|district\s+magistrate|district\s+collector|collector|dm|superintendent\s+of\s+police|sp|s\.p\.|police\s+superintendent)\b/i.test(normalizedMessage);
+	const routingMessage = normalizeLiveSearchTypos(normalizedMessage);
+	const hasOfficeQuestionSignal = /\b(who is|who's|who\s+is|what is|name of|posted as|serving as|represents|holds)\b/i.test(routingMessage);
+	const hasPublicOfficeEntitySignal = /\b(mla|mp|member\s+of\s+legislative\s+assembly|member\s+of\s+parliament|assembly\s+constituency|legislative\s+assembly|legislative\s+council|cm|chief\s+minister|prime\s+minister|pm|president|governor|minister|ias|ips|district\s+magistrate|district\s+collector|collector|dm|superintendent\s+of\s+police|sp|s\.p\.|police\s+superintendent)\b/i.test(routingMessage);
 	const hasPublicPmAliasSignal = /\bpm\b/i.test(normalizedMessage)
 		&& !/^\s*\d+\s*pm\b/i.test(normalizedMessage)
 		&& !/\b(?:at|by|from|until|before|after)\s+\d+\s*pm\b/i.test(normalizedMessage);
