@@ -737,6 +737,10 @@ const classifyQueryIntent = (query) => {
 	const finance = /\b(gold|silver|crude\s+oil|oil\s+price|share\s+price|stock\s+price|stock\s+market|market\s+price|crypto|bitcoin|ethereum|nifty|sensex|exchange\s+rate|forex|currency\s+rate|usd\s+to\s+inr|inr\s+to\s+usd|commodity\s+price|gold\s+price|gold\s+rate|petrol\s+price|diesel\s+price)\b/.test(lower);
 	const representative = /\b(mla|mp|member\s+of\s+legislative\s+assembly|member\s+of\s+parliament|assembly\s+constituency|legislative\s+assembly|legislative\s+council)\b/.test(lower);
 	const municipal = /\b(mayor|councillor|councilor|ward)\b/.test(lower);
+	// State/national executive office questions need official-source search variants,
+	// including abbreviated queries such as "CM in West Bengal in 2026".
+	const executiveOffice = /\b(chief\s+minister|prime\s+minister|president|governor|minister|\bcm\b|\bpm\b)\b/.test(lower)
+		&& /\b(who|what|which|name|current|present|latest|now|in\s+(?:18|19|20)\d{2}|as\s+of|office|serving|holds|is)\b/.test(lower);
 	const election = /\b(election|elections|result|results|winner|won|counting|vote\s+share|votes?)\b/.test(lower)
 		&& /\b(assembly\s+constituency|constituency|mla|mp|member\s+of\s+legislative\s+assembly|member\s+of\s+parliament|minister|mayor|ward|district|west\s+bengal|india)\b/.test(lower);
 	const docs = /\b(api|sdk|docs|documentation|install|setup|tutorial|reference|changelog|release\s+notes)\b/.test(lower);
@@ -755,6 +759,8 @@ const classifyQueryIntent = (query) => {
 
 	const timeSensitive = finance
 		|| election
+		|| executiveOffice
+		|| /\b(?:18|19|20)\d{2}\b/.test(lower)
 		|| /\b(today|now|current|currently|latest|live|recent|recently|this\s+(week|month|year)|breaking|news|update|updates|as\s+of|right\s+now|score|weather|forecast|price|rate|richest|wealthiest|net\s?worth|billionaires?|market\s?cap(?:italization)?|leaderboard|who\s+won|standings|points\s+table|box\s+office|release\s+date)\b/.test(lower);
 
 	const urlLike = /^https?:\/\//i.test(normalizedQuery)
@@ -785,7 +791,7 @@ const classifyQueryIntent = (query) => {
 		urlLike,
 		encyclopedic,
 		place: (officer || representative || municipal || election || finance) ? extractLikelyPlace(normalizedQuery) : "",
-		publicOffice: officer || representative || municipal || election,
+		publicOffice: officer || representative || municipal || election || executiveOffice,
 	};
 };
 
