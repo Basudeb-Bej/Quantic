@@ -3449,7 +3449,15 @@ function ChatPage() {
             // If the text box was typed in or cleared since our last write (or a message was just sent),
             // start again from what is there now instead of bringing old words back.
             const boxValue = messageInputRef.current?.value;
-            if (typeof boxValue === "string" && boxValue !== voiceLastDraftRef.current) {
+            // In full voice conversation mode, the composer is not the source of truth.
+            // Android Chrome may deliver recognition results before React has updated the
+            // input value; treating that stale value as an edit can erase the spoken phrase
+            // and prevent the auto-send timer from submitting it.
+            if (
+                !voiceConversationOpenRef.current &&
+                typeof boxValue === "string" &&
+                boxValue !== voiceLastDraftRef.current
+            ) {
                 voiceBaseTextRef.current = boxValue.trim();
                 voiceConsumedRef.current = lastResult?.isFinal ? results.length : Math.max(0, results.length - 1);
             }
