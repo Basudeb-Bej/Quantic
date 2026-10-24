@@ -330,7 +330,27 @@ const writeStoredAttachments = (key, value) => {
         return;
     }
 
-    localStorage.setItem(key, JSON.stringify(attachments));
+    try {
+        localStorage.setItem(key, JSON.stringify(attachments));
+    } catch (error) {
+        // Draft attachment persistence is best-effort: large base64 files can exceed
+        // the browser's small localStorage quota. Never let this break the chat UI.
+        if (error?.name === "QuotaExceededError" || error?.name === "NS_ERROR_DOM_QUOTA_REACHED") {
+            try {
+                if (typeof window !== "undefined") {
+                    window.dispatchEvent(new CustomEvent("quantic:storage-quota-exceeded", {
+                        detail: { key, kind: "draft-attachments" },
+                    }));
+                }
+            } catch {
+                // Notification failure must not affect chat functionality.
+            }
+            return false;
+        }
+        console.error("[ChatPage] Could not persist draft attachments.", error);
+        return false;
+    }
+    return true;
 };
 
 const readStoredString = (key, fallback = "") => {
@@ -1773,6 +1793,17 @@ function CodeBlock({ code, language }) {
 
 function ChatPage() {
     const { toasts, showToast, dismissToast } = useToasts();
+
+    useEffect(() => {
+        const handleStorageQuotaExceeded = () => {
+            showToast(
+                "This attachment is too large to save as a draft in this browser. It is still available in the current chat; send it or remove it before leaving.",
+                { type: "warning" }
+            );
+        };
+        window.addEventListener("quantic:storage-quota-exceeded", handleStorageQuotaExceeded);
+        return () => window.removeEventListener("quantic:storage-quota-exceeded", handleStorageQuotaExceeded);
+    }, [showToast]);
     const [auth, setAuth] = useState(() => readStoredJson(authProfileStorageKey, null));
     const [messages, setMessages] = useState([]);
     const [chatThreads, setChatThreads] = useState([]);
