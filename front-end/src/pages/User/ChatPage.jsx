@@ -2468,8 +2468,24 @@ function ChatPage() {
         try {
             recognition.lang = voiceLangRef.current || recognition.lang;
             recognition.start();
-        } catch {
-            // ignore
+        } catch (error) {
+            // Android Chrome can briefly report the recogniser as still active after onend.
+            // Retry only for mobile voice sessions; leave desktop timing and behavior unchanged.
+            const isMobileChrome = isMobileViewport() && /Android/i.test(navigator?.userAgent || "") &&
+                /Chrome/i.test(navigator?.userAgent || "");
+            if (isMobileChrome && voiceModeEnabledRef.current && !isSpeakingRef.current && !isSendingRef.current) {
+                if (voiceRestartTimerRef.current) {
+                    window.clearTimeout(voiceRestartTimerRef.current);
+                }
+                voiceRestartTimerRef.current = window.setTimeout(() => {
+                    voiceRestartTimerRef.current = null;
+                    if (voiceModeEnabledRef.current && !isSpeakingRef.current && !isSendingRef.current) {
+                        startVoiceListening();
+                    }
+                }, 500);
+            } else if (error?.name !== "InvalidStateError") {
+                console.warn("[Voice] Unable to start speech recognition.", error);
+            }
         }
     };
 
