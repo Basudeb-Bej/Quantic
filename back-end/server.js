@@ -126,7 +126,7 @@ app.set("trust proxy", 1);
 const corsOptions = {
   // Keep the allow-list restricted to configured frontends and the production Vercel site.
   origin: (origin, callback) => {
-    const normalizedOrigin = String(origin || "").trim().replace(/\\/+$/, "");
+    const normalizedOrigin = String(origin || "").trim().replace(/\/+$/, "");
     const allowed = !origin || allowedOrigins.includes(normalizedOrigin);
 
     if (!allowed && !warnedOrigins.has(normalizedOrigin)) {
