@@ -168,10 +168,22 @@ export const speakWithAI = async (content, onStart, onEnd, options = {}) => {
 	if (requestId !== activeSpeechRequestId) return null;
 	const resolvedLang = voice?.lang || preferredLang;
 
+	const synth = window.speechSynthesis;
 	try {
-		window.speechSynthesis.cancel();
+		synth.cancel();
 	} catch {
 		// ignore
+	}
+
+	// Android Chrome can drop speech queued immediately after cancel(), especially
+	// after microphone recognition has just stopped. Give its speech engine a brief
+	// moment to settle; keep the existing desktop path unchanged.
+	const isAndroidChrome =
+		/Android/i.test(navigator?.userAgent || "") &&
+		/Chrome/i.test(navigator?.userAgent || "");
+	if (isAndroidChrome) {
+		await new Promise((resolve) => window.setTimeout(resolve, 120));
+		if (requestId !== activeSpeechRequestId) return null;
 	}
 
 	const chunks = chunkText(readableText);
