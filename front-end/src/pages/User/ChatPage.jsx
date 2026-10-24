@@ -2473,7 +2473,7 @@ function ChatPage() {
             // Retry only for mobile voice sessions; leave desktop timing and behavior unchanged.
             const isMobileChrome = isMobileViewport() && /Android/i.test(navigator?.userAgent || "") &&
                 /Chrome/i.test(navigator?.userAgent || "");
-            if (isMobileChrome && voiceModeEnabledRef.current && !isSpeakingRef.current && !isSendingRef.current) {
+            if (isMobileChrome && !isSpeakingRef.current && !isSendingRef.current) {
                 if (voiceRestartTimerRef.current) {
                     window.clearTimeout(voiceRestartTimerRef.current);
                 }
