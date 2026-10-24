@@ -2655,8 +2655,12 @@ function ChatPage() {
         }
 
         const hasNativeAudio = typeof window !== "undefined" && typeof Audio !== "undefined";
+        // On mobile, use the page-level SpeechSynthesis path directly for message read-aloud.
+        // The service path reports success before speech actually starts, which can swallow
+        // the fallback when mobile browsers silently reject/drop the queued utterance.
+        const useMobileSpeechPath = isMobileViewport();
 
-        if (hasNativeAudio) {
+        if (hasNativeAudio && !useMobileSpeechPath) {
             const playedAudio = await playAssistantVoice(content, options);
 
             if (playedAudio) {
