@@ -123,28 +123,33 @@ const warnedOrigins = new Set();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
-app.use(
-  cors({
-    // Requests with no Origin header (health checks, curl) are allowed; browsers always send one.
-    origin: (origin, callback) => {
-      const allowed = !origin || allowedOrigins.includes(origin);
+const corsOptions = {
+  // Keep the allow-list restricted to configured frontends and the production Vercel site.
+  origin: (origin, callback) => {
+    const normalizedOrigin = String(origin || "").trim().replace(/\\/+$/, "");
+    const allowed = !origin || allowedOrigins.includes(normalizedOrigin);
 
-      if (!allowed && !warnedOrigins.has(origin)) {
-        warnedOrigins.add(origin);
-        console.warn(
-          formatLog("warn", "CORS blocked an origin. Set FRONTEND_URL to match it exactly.", {
-            blockedOrigin: origin,
-            allowedOrigins,
-          })
-        );
-      }
+    if (!allowed && !warnedOrigins.has(normalizedOrigin)) {
+      warnedOrigins.add(normalizedOrigin);
+      console.warn(
+        formatLog("warn", "CORS blocked an origin. Set FRONTEND_URL to match it exactly.", {
+          blockedOrigin: normalizedOrigin,
+          allowedOrigins,
+        })
+      );
+    }
 
-      callback(null, allowed);
-    },
-    credentials: true,
-    exposedHeaders: ["x-chat-thread-id"],
-  })
-);
+    callback(null, allowed);
+  },
+  credentials: true,
+  exposedHeaders: ["x-chat-thread-id"],
+  optionsSuccessStatus: 204,
+};
+
+// Register CORS before security headers, parsers, rate limits, and routes so
+// browser preflight requests receive CORS headers without reaching those handlers.
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(helmet());
 app.use(morgan("combined"));
 const defaultJsonParser = express.json({ limit: requestBodyLimit });
