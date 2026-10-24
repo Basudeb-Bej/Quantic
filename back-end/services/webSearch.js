@@ -2709,8 +2709,14 @@ const searchWebDetailed = async (query, options = {}) => {
 
 		const rankedSources = rankResults(enriched, normalizedQuery, intent).slice(0, MAX_RESULTS);
 
-		// Only the sources the model will actually see/cite need clickable links.
-		await resolveSourceLinks(rankedSources.slice(0, CONTEXT_SOURCE_LIMIT));
+		// Resolve source URLs before exposing either list. The ranked list is used
+		// for model context, while the raw deduplicated list is also returned to
+		// callers/UI; leaving it untouched leaks original Google News redirect URLs
+		// and dead publisher URLs into source cards.
+		await Promise.all([
+			resolveSourceLinks(rankedSources),
+			resolveSourceLinks(deduped),
+		]);
 
 		const consensus = buildConsensus(rankedSources, intent);
 
