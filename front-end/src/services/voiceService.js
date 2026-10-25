@@ -154,6 +154,21 @@ const chunkText = (text, maxLen = 180) => {
 	return chunks;
 };
 
+// Mobile browsers only allow speech after a tap-initiated utterance.
+export const primeSpeechSynthesis = () => {
+	try {
+		if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+			return;
+		}
+
+		const silent = new SpeechSynthesisUtterance(" ");
+		silent.volume = 0;
+		window.speechSynthesis.speak(silent);
+	} catch {
+		// ignore
+	}
+};
+
 export const speakWithAI = async (content, onStart, onEnd, options = {}) => {
 	const readableText = getReadableText(content);
 	if (!readableText || typeof window === "undefined" || !("speechSynthesis" in window)) {
@@ -187,44 +202,111 @@ export const speakWithAI = async (content, onStart, onEnd, options = {}) => {
 	}
 
 	const chunks = chunkText(readableText);
+	const START_TIMEOUT_MS = 3000;
 	let index = 0;
+	let started = false;
 
-	const speakNext = () => {
-		if (requestId !== activeSpeechRequestId) return;
-		if (index >= chunks.length) {
-			if (typeof onEnd === "function") onEnd();
-			return;
-		}
-		const utterance = new SpeechSynthesisUtterance(chunks[index]);
-		utterance.lang = resolvedLang;
-		utterance.voice = voice || null;
-		utterance.rate = 0.86;
-		utterance.pitch = 1.05;
-		utterance.volume = 1;
+	return new Promise((resolve) => {
+		let settled = false;
 
-		if (index === 0 && typeof onStart === "function") {
-			utterance.onstart = () => onStart();
-		}
-		if (typeof options.onBoundary === "function") {
-			utterance.onboundary = (event) => options.onBoundary(event);
-		}
-		utterance.onend = () => {
-			if (requestId !== activeSpeechRequestId) return;
-			index += 1;
-			speakNext();
-		};
-		utterance.onerror = () => {
-			if (requestId !== activeSpeechRequestId) return;
-			index += 1;
-			speakNext();
+		const settle = (value) => {
+			if (!settled) {
+				settled = true;
+				resolve(value);
+			}
 		};
 
-		window.speechSynthesis.speak(utterance);
-	};
+		// If the first chunk never starts (browser dropped it), report failure so the caller can fall back.
+		const startGuard = window.setTimeout(() => {
+			if (started) {
+				return;
+			}
 
-	speakNext();
-	window.speechSynthesis.resume?.();
-	return true;
+			if (requestId !== activeSpeechRequestId) {
+				settle(null); // stopped or superseded: caller must NOT fall back
+				return;
+			}
+
+			activeSpeechRequestId += 1;
+
+			try {
+				window.speechSynthesis.cancel();
+			} catch {
+				// ignore
+			}
+
+			settle(false);
+		}, START_TIMEOUT_MS);
+
+		const speakNext = () => {
+			if (requestId !== activeSpeechRequestId) {
+				return;
+			}
+
+			if (index >= chunks.length) {
+				if (typeof onEnd === "function") {
+					onEnd();
+				}
+
+				return;
+			}
+
+			const utterance = new SpeechSynthesisUtterance(chunks[index]);
+			utterance.lang = resolvedLang;
+			utterance.voice = voice || null;
+			utterance.rate = 0.86;
+			utterance.pitch = 1.05;
+			utterance.volume = 1;
+
+			utterance.onstart = () => {
+				if (started) {
+					return;
+				}
+
+				started = true;
+				window.clearTimeout(startGuard);
+
+				if (typeof onStart === "function") {
+					onStart();
+				}
+
+				settle(true);
+			};
+
+			if (typeof options.onBoundary === "function") {
+				utterance.onboundary = (event) => options.onBoundary(event);
+			}
+
+			utterance.onend = () => {
+				if (requestId !== activeSpeechRequestId) {
+					return;
+				}
+
+				index += 1;
+				speakNext();
+			};
+
+			utterance.onerror = () => {
+				if (requestId !== activeSpeechRequestId) {
+					return;
+				}
+
+				if (!started) {
+					window.clearTimeout(startGuard);
+					settle(false);
+					return;
+				}
+
+				index += 1;
+				speakNext();
+			};
+
+			window.speechSynthesis.speak(utterance);
+		};
+
+		speakNext();
+		window.speechSynthesis.resume?.();
+	});
 };
 
 /* ------------------------------------------------------------------------- *
