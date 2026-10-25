@@ -21,6 +21,7 @@ import {
     rememberVoiceLanguage,
     speakWithAI,
     cancelSpeechSynthesis,
+    primeSpeechSynthesis,
 } from "../../services/voiceService";
 import { useToasts } from "../../hooks/useToasts";
 
@@ -446,6 +447,23 @@ const readJsonResponse = async (response) => {
     } catch {
         return null;
     }
+};
+
+// Android Chrome (continuous mode) sends cumulative results ("hello", "hello how", ...).
+const collapseCumulativeSegments = (segments) => {
+    const out = [];
+
+    for (const segment of segments) {
+        const previous = out[out.length - 1];
+
+        if (previous && segment.toLowerCase().startsWith(previous.toLowerCase())) {
+            out[out.length - 1] = segment;
+        } else {
+            out.push(segment);
+        }
+    }
+
+    return out;
 };
 
 const getLegalCopySegments = (isLoggedIn) =>
@@ -1945,6 +1963,7 @@ function ChatPage() {
     const isSendingRef = useRef(false);
     const isListeningRef = useRef(false);
     const isSpeakingRef = useRef(false);
+    const voiceReplyPendingRef = useRef(false); // a spoken reply is on its way: keep the mic closed
     const voiceModeEnabledRef = useRef(false);
     const voiceConversationOpenRef = useRef(false);
     const speechReadAloudRef = useRef({ status: "idle", requestId: 0, utterance: null });
@@ -2461,7 +2480,7 @@ function ChatPage() {
         }
 
         const recognition = recognitionRef.current;
-        if (!recognition || isListeningRef.current || isSpeakingRef.current) {
+        if (!recognition || isListeningRef.current || isSpeakingRef.current || (voiceConversationOpenRef.current && voiceReplyPendingRef.current)) {
             return;
         }
 
@@ -2499,7 +2518,7 @@ function ChatPage() {
         }
 
         voiceRestartTimerRef.current = window.setTimeout(() => {
-            if (!voiceModeEnabledRef.current || isSpeakingRef.current) {
+            if (!voiceModeEnabledRef.current || isSpeakingRef.current || (voiceConversationOpenRef.current && (isSendingRef.current || voiceReplyPendingRef.current))) {
                 return;
             }
 
@@ -2509,6 +2528,7 @@ function ChatPage() {
 
     const handleToggleVoiceMode = () => {
         if (voiceModeEnabledRef.current) {
+            voiceReplyPendingRef.current = false;
             stopVoicePlayback();
             stopVoiceListening();
             return;
@@ -2526,11 +2546,13 @@ function ChatPage() {
         voiceLastDraftRef.current = typedText;
         noSpeechStreakRef.current = 0;
 
+        if (isMobileViewport()) primeSpeechSynthesis();
         setVoiceModeEnabled(true);
         startVoiceListening();
     };
 
     const handleStopVoiceMode = () => {
+        voiceReplyPendingRef.current = false;
         stopVoicePlayback();
         stopVoiceListening();
         setVoiceConversationOpen(false);
@@ -2543,6 +2565,8 @@ function ChatPage() {
         }
 
         stopVoicePlayback();
+        voiceReplyPendingRef.current = false;
+        if (isMobileViewport()) primeSpeechSynthesis();
         stopVoiceListening({ keepVoiceMode: false });
         setMessageDraft("");
         resetVoiceTranscript();
@@ -2563,6 +2587,7 @@ function ChatPage() {
         }
 
         if (isSpeakingRef.current) {
+            voiceReplyPendingRef.current = false;
             stopVoicePlayback();
             window.setTimeout(() => {
                 if (voiceConversationOpenRef.current && !isListeningRef.current) {
@@ -2580,14 +2605,23 @@ function ChatPage() {
         startVoiceListening();
     };
 
+    const finishVoiceReply = (resume) => {
+        voiceReplyPendingRef.current = false;
+
+        if (resume && voiceModeEnabledRef.current) {
+            restartVoiceListening();
+        }
+    };
+
     const playAssistantVoice = async (content, { resumeListening = false } = {}) => {
         const readableText = getReadableMessageText(content);
+        const shouldResumeListening = Boolean(resumeListening || voiceModeEnabledRef.current);
 
         if (!readableText) {
+            finishVoiceReply(shouldResumeListening);
             return null;
         }
 
-        const shouldResumeListening = Boolean(resumeListening || voiceModeEnabledRef.current);
         const isManualPlayback = !shouldResumeListening;
 
         if (shouldResumeListening) {
@@ -2600,50 +2634,49 @@ function ChatPage() {
         const playbackRequestId = ++voicePlaybackRequestRef.current;
 
         try {
-            const audio = await speakWithAI(
+            // true = speech really started, false = browser never started it, null = unsupported/superseded
+            const result = await speakWithAI(
                 readableText,
                 () => setIsSpeaking(true),
                 () => {
                     setIsSpeaking(false);
                     voiceAudioRef.current = null;
+
                     if (isManualPlayback) {
                         setManualPlaybackActive(false);
                     }
-                    if (shouldResumeListening && voiceModeEnabledRef.current) {
-                        restartVoiceListening();
-                    }
+
+                    finishVoiceReply(shouldResumeListening);
                 },
                 { onBoundary: handleSpeechBoundaryPulse }
             );
 
-            // Stop may have been clicked while the TTS request was still pending.
+            // Stop was clicked while the request was pending: handled, do not fall back to speaking.
             if (playbackRequestId !== voicePlaybackRequestRef.current) {
-                if (audio) {
-                    try {
-                        audio.pause();
-                        audio.currentTime = 0;
-                        audio.src = "";
-                    } catch {
-                        // ignore
-                    }
-                }
-                return null;
+                return true;
             }
 
-            if (audio) {
-                voiceAudioRef.current = audio;
+            if (result === true) {
+                return true;
             }
 
-            return audio;
-        } catch {
+            // Never started: let the caller fall back to the page-level speech path.
             setIsSpeaking(false);
-            voiceAudioRef.current = null;
+
             if (isManualPlayback) {
                 setManualPlaybackActive(false);
             }
-            if (shouldResumeListening && voiceModeEnabledRef.current) {
-                restartVoiceListening();
+
+            return null;
+        } catch {
+            setIsSpeaking(false);
+            voiceAudioRef.current = null;
+
+            if (isManualPlayback) {
+                setManualPlaybackActive(false);
             }
+
+            finishVoiceReply(shouldResumeListening);
             return null;
         }
     };
@@ -2654,16 +2687,17 @@ function ChatPage() {
             return;
         }
 
-        const hasNativeAudio = typeof window !== "undefined" && typeof Audio !== "undefined";
-        // On mobile, use the page-level SpeechSynthesis path directly for message read-aloud.
-        // The service path reports success before speech actually starts, which can swallow
-        // the fallback when mobile browsers silently reject/drop the queued utterance.
-        const useMobileSpeechPath = isMobileViewport();
+        const shouldResumeListening = Boolean(options?.resumeListening || voiceModeEnabledRef.current);
 
-        if (hasNativeAudio && !useMobileSpeechPath) {
-            const playedAudio = await playAssistantVoice(content, options);
+        if (isMobileViewport()) {
+            primeSpeechSynthesis();
+        }
 
-            if (playedAudio) {
+        // Same path on mobile and desktop.
+        if (typeof window !== "undefined" && typeof Audio !== "undefined") {
+            const played = await playAssistantVoice(content, options);
+
+            if (played) {
                 return;
             }
         }
@@ -2671,36 +2705,22 @@ function ChatPage() {
         const readableText = getReadableMessageText(content);
 
         if (!readableText || typeof window === "undefined" || !("speechSynthesis" in window)) {
+            finishVoiceReply(shouldResumeListening);
             return;
         }
 
         const synth = window.speechSynthesis;
         const speechState = speechReadAloudRef.current;
-        const shouldResumeListening = Boolean(options?.resumeListening || voiceModeEnabledRef.current);
 
         if (shouldResumeListening) {
             stopVoiceListening({ keepVoiceMode: true });
         }
 
-        // Toggle behavior: if currently speaking/pending, stop.
-        if (speechState.status !== "idle") {
-            speechState.status = "idle";
-            speechState.requestId += 1;
-            speechState.utterance = null;
-            try {
-                synth.cancel();
-            } catch {
-                // ignore
-            }
-            setManualPlaybackActive(false);
-            return;
-        }
-
         speechState.status = "pending";
         const requestId = speechState.requestId + 1;
         speechState.requestId = requestId;
+
         try {
-            // Clear any stuck queue before speaking.
             synth.cancel();
             synth.resume?.();
         } catch {
@@ -2719,54 +2739,39 @@ function ChatPage() {
 
         const utterance = new SpeechSynthesisUtterance(readableText);
         speechReadAloudRef.current.utterance = utterance;
-
         utterance.voice = preferredVoice || null;
         utterance.lang = preferredVoice?.lang || preferredLang || navigator?.language || "en-US";
         utterance.rate = 0.86;
         utterance.pitch = 1.05;
         utterance.volume = 1;
+        utterance.onboundary = handleSpeechBoundaryPulse;
+
+        const done = () => {
+            if (speechReadAloudRef.current.requestId !== requestId) {
+                return;
+            }
+
+            speechReadAloudRef.current.status = "idle";
+            speechReadAloudRef.current.utterance = null;
+            setIsSpeaking(false);
+            setManualPlaybackActive(false);
+            finishVoiceReply(shouldResumeListening);
+        };
+
         utterance.onstart = () => {
             if (speechReadAloudRef.current.requestId === requestId) {
                 speechReadAloudRef.current.status = "speaking";
                 setIsSpeaking(true);
             }
         };
-        utterance.onend = () => {
-            if (speechReadAloudRef.current.requestId === requestId) {
-                speechReadAloudRef.current.status = "idle";
-                speechReadAloudRef.current.utterance = null;
-                setIsSpeaking(false);
-                setManualPlaybackActive(false);
-                if (shouldResumeListening && voiceModeEnabledRef.current) {
-                    restartVoiceListening();
-                }
-            }
-        };
-        utterance.onerror = () => {
-            if (speechReadAloudRef.current.requestId === requestId) {
-                speechReadAloudRef.current.status = "idle";
-                speechReadAloudRef.current.utterance = null;
-                setIsSpeaking(false);
-                setManualPlaybackActive(false);
-                if (shouldResumeListening && voiceModeEnabledRef.current) {
-                    restartVoiceListening();
-                }
-            }
-        };
+        utterance.onend = done;
+        utterance.onerror = done;
 
         try {
             synth.speak(utterance);
             synth.resume?.();
         } catch {
-            if (speechReadAloudRef.current.requestId === requestId) {
-                speechReadAloudRef.current.status = "idle";
-                speechReadAloudRef.current.utterance = null;
-                setIsSpeaking(false);
-                setManualPlaybackActive(false);
-                if (shouldResumeListening && voiceModeEnabledRef.current) {
-                    restartVoiceListening();
-                }
-            }
+            done();
         }
     };
 
@@ -3047,6 +3052,9 @@ function ChatPage() {
 
         setMessageDraft("");
         setIsSending(true);
+        isSendingRef.current = true;
+        voiceReplyPendingRef.current = voiceConversationOpenRef.current;
+        let replyScheduledForSpeech = false;
         console.log("[ChatPage] send:start", normalizedUserMessage);
 
         if (appendUserToTranscript) {
@@ -3256,6 +3264,7 @@ function ChatPage() {
 
                 updateAssistantMessage(botText);
                 if (shouldSpeakVoiceReply && botText.trim()) {
+                    replyScheduledForSpeech = true;
                     window.setTimeout(() => {
                         void handleReadMessageAloud(botText, { resumeListening: true });
                     }, 100);
@@ -3313,6 +3322,7 @@ function ChatPage() {
             } else {
                 updateAssistantMessage(text);
                 if (shouldSpeakVoiceReply && String(text || "").trim()) {
+                    replyScheduledForSpeech = true;
                     window.setTimeout(() => {
                         void handleReadMessageAloud(text, { resumeListening: true });
                     }, 100);
@@ -3329,7 +3339,13 @@ function ChatPage() {
             console.error("[ChatPage] send:error", error);
             updateAssistantMessage(error instanceof Error ? error.message : "Unable to get a reply.");
         } finally {
+            isSendingRef.current = false;
             setIsSending(false);
+
+            // Error or empty reply: nothing will be spoken, so reopen the mic instead of getting stuck.
+            if (!replyScheduledForSpeech && voiceReplyPendingRef.current) {
+                finishVoiceReply(voiceConversationOpenRef.current);
+            }
         }
     };
 
@@ -3477,7 +3493,8 @@ function ChatPage() {
                 }
             }
 
-            const sessionText = joinVoiceTranscript(segments, recognition.lang);
+            const finalSegments = /Android/i.test(navigator?.userAgent || "") ? collapseCumulativeSegments(segments) : segments;
+            const sessionText = joinVoiceTranscript(finalSegments, recognition.lang);
             voiceSessionTextRef.current = sessionText;
 
             const fullText = joinVoiceTranscript([voiceBaseTextRef.current, sessionText], recognition.lang);
