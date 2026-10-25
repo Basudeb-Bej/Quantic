@@ -730,6 +730,73 @@ const extractLikelyPlace = (value) => {
 	return kept.slice(0, 4).join(" ").trim();
 };
 
+// Decides whether the user wants "now" or a specific past period.
+const extractTemporalScope = (query) => {
+	const lower = String(query ?? "").toLowerCase();
+	const nowYear = new Date().getFullYear();
+	const years = new Set();
+
+	for (const match of lower.matchAll(/\b(19[9]\d|20\d{2})\b/g)) {
+		const year = Number(match[1]);
+
+		if (year > nowYear + 1) {
+			continue;
+		}
+
+		const before = lower.slice(Math.max(0, match.index - 6), match.index);
+		const after = lower.slice(match.index + 4, match.index + 16);
+
+		// "Rs 2000", "2000 rupees", "2000 mAh" are amounts, not years
+		if (/(?:₹|rs\.?|inr|\$|usd|€|£)\s*$/.test(before)) {
+			continue;
+		}
+
+		if (/^\s*(?:rupees?|rs\b|dollars?|usd|inr|mah|px|mb|gb|kg|words?|votes?|people)/.test(after)) {
+			continue;
+		}
+
+		years.add(year);
+	}
+
+	if (/\blast\s+year\b/.test(lower)) {
+		years.add(nowYear - 1);
+	}
+
+	if (/\bthis\s+year\b/.test(lower)) {
+		years.add(nowYear);
+	}
+
+	const wantsNow = /\b(today|tonight|yesterday|now|right now|currently|current|present|latest|live|breaking|recent(?:ly)?|this\s+(?:week|month))\b/.test(lower);
+	const list = [...years].sort((a, b) => a - b);
+	// Historical = the user pinned a past year and did not ask for "now"
+	const historical = list.some((year) => year < nowYear) && !wantsNow;
+
+	return { years: list, historical, wantsNow };
+};
+
+// Per-provider time filters.
+const buildTemporalParams = (intent) => {
+	const t = intent.temporal || { years: [] };
+
+	if (intent.historical && t.years.length) {
+		const first = Math.min(...t.years);
+		const last = Math.max(...t.years);
+
+		return {
+			ddg: "",
+			tavily: { start_date: `${first}-01-01`, end_date: `${last}-12-31` },
+			gnews: `after:${first}-01-01 before:${last + 1}-01-01`,
+			key: `y${first}-${last}`,
+		};
+	}
+
+	if (intent.news || intent.finance) {
+		return { ddg: "w", tavily: { time_range: "week" }, gnews: "when:7d", key: "w" };
+	}
+
+	return { ddg: "", tavily: {}, gnews: "", key: "" };
+};
+
 const classifyQueryIntent = (query) => {
 	const normalizedQuery = normalizeQuery(query);
 	const lower = normalizedQuery.toLowerCase();
@@ -790,6 +857,8 @@ const classifyQueryIntent = (query) => {
 		news,
 		urlLike,
 		encyclopedic,
+		temporal: extractTemporalScope(normalizedQuery),
+		historical: extractTemporalScope(normalizedQuery).historical,
 		place: (officer || representative || municipal || election || finance) ? extractLikelyPlace(normalizedQuery) : "",
 		publicOffice: officer || representative || municipal || election || executiveOffice,
 	};
@@ -813,6 +882,8 @@ const TRANSLITERATION_ALIASES = [
 const buildVariantCandidates = (intent) => {
 	const base = intent.query;
 	const place = intent.place;
+	const when = intent.historical ? String(intent.temporal.years[0]) : "current";
+	const yearForQuery = intent.historical ? intent.temporal.years[0] : new Date().getFullYear();
 	const candidates = [];
 
 	const push = (text, priority) => {
@@ -827,22 +898,22 @@ const buildVariantCandidates = (intent) => {
 	push(base, 100);
 
 	if (intent.officer && intent.officerIas) {
-		push(place ? `District Magistrate ${place} current` : `${base} district magistrate`, 92);
-		push(place ? `Collector ${place} ${new Date().getFullYear()}` : `${base} district collector`, 78);
+		push(place ? `District Magistrate ${place} ${when}` : `${base} district magistrate`, 92);
+		push(place ? `Collector ${place} ${yearForQuery}` : `${base} district collector`, 78);
 	}
 
 	if (intent.officer && intent.officerIps) {
-		push(place ? `Superintendent of Police ${place} current` : `${base} superintendent of police`, 92);
+		push(place ? `Superintendent of Police ${place} ${when}` : `${base} superintendent of police`, 92);
 		push(place ? `SP ${place} police official` : `${base} SP name`, 78);
 	}
 
 	if (intent.representative) {
-		push(place ? `current MLA of ${place}` : `${base} current MLA`, 90);
+		push(place ? `${when} MLA of ${place}` : `${base} current MLA`, 90);
 		push(place ? `${place} assembly constituency MLA` : `${base} assembly constituency`, 76);
 	}
 
 	if (intent.municipal) {
-		push(place ? `current mayor of ${place}` : `${base} current mayor`, 88);
+		push(place ? `${when} mayor of ${place}` : `${base} current mayor`, 88);
 		push(place ? `${place} municipal corporation mayor` : `${base} municipal corporation`, 72);
 	}
 
@@ -851,7 +922,11 @@ const buildVariantCandidates = (intent) => {
 		push(`${base} results election commission of india`, 70);
 	}
 
-	if (intent.finance) {
+	if (intent.finance && intent.historical) {
+		push(`${base} historical price`, 80);
+	}
+
+	if (intent.finance && !intent.historical) {
 		if (/\bgold\b/.test(intent.lower)) {
 			push(place ? `gold price today in ${place} 22k 24k` : "gold price today India 22k 24k", 94);
 			push(`${base} mcx live rate`, 74);
@@ -900,8 +975,8 @@ const buildVariantCandidates = (intent) => {
 		push(`${base} site:ac.in`, 60);
 	}
 
-	if (intent.timeSensitive && !intent.finance) {
-		push(`${base} ${new Date().getFullYear()} latest`, 68);
+	if (intent.timeSensitive && !intent.finance && !intent.historical) {
+		push(intent.temporal.years.length ? `${base} latest` : `${base} ${new Date().getFullYear()} latest`, 68);
 	}
 
 	for (const [aliasSource, replacement] of TRANSLITERATION_ALIASES) {
@@ -1156,7 +1231,7 @@ const extractHtmlResults = (html, sourceLabel = "ddg-html") => {
 	return results;
 };
 
-const searchDuckDuckGoHtml = async (query, deadline, { lite = false } = {}) => {
+const searchDuckDuckGoHtml = async (query, deadline, { lite = false, recency = "" } = {}) => {
 	try {
 		const url = new URL(lite ? DDG_LITE_ENDPOINT : DDG_HTML_ENDPOINT);
 
@@ -1168,7 +1243,7 @@ const searchDuckDuckGoHtml = async (query, deadline, { lite = false } = {}) => {
 				Accept: "text/html,application/xhtml+xml",
 				"Accept-Language": "en-US,en;q=0.9",
 			},
-			body: new URLSearchParams({ q: query, kl: "wt-wt", df: "" }).toString(),
+			body: new URLSearchParams({ q: query, kl: "wt-wt", df: recency }).toString(),
 		}, SEARCH_TIMEOUT_MS, deadline);
 
 		if (!response.ok) {
@@ -1279,7 +1354,7 @@ const cleanNewsTitle = (title, publisher) => {
 	return text;
 };
 
-const searchGoogleNews = async (query, deadline) => {
+const searchGoogleNews = async (query, deadline, { operator = "" } = {}) => {
 	const normalizedQuery = normalizeQuery(query);
 
 	if (!normalizedQuery || !NEWS_RSS_ENABLED) {
@@ -1288,7 +1363,7 @@ const searchGoogleNews = async (query, deadline) => {
 
 	try {
 		const url = new URL(GOOGLE_NEWS_RSS_ENDPOINT);
-		url.searchParams.set("q", normalizedQuery);
+		url.searchParams.set("q", operator ? `${normalizedQuery} ${operator}` : normalizedQuery);
 		url.searchParams.set("hl", NEWS_RSS_HL);
 		url.searchParams.set("gl", NEWS_RSS_GL);
 		url.searchParams.set("ceid", NEWS_RSS_CEID);
@@ -1367,7 +1442,7 @@ const searchBingRss = async (query, deadline) => {
 	}
 };
 
-const searchTavily = async (query, deadline, { news = false } = {}) => {
+const searchTavily = async (query, deadline, { news = false, temporal = {} } = {}) => {
 	const key = getTavilyKey();
 	const normalizedQuery = normalizeQuery(query);
 
@@ -1386,6 +1461,7 @@ const searchTavily = async (query, deadline, { news = false } = {}) => {
 				max_results: TAVILY_MAX_RESULTS,
 				include_answer: false,
 				include_raw_content: false,
+				...(temporal?.tavily || {}),
 			}),
 		}, TAVILY_TIMEOUT_MS, deadline);
 
@@ -1589,16 +1665,18 @@ const buildSearchLanes = (variants, intent) => {
 	const lanes = [];
 	const first = variants[0];
 	const newsQuery = buildCurrentNewsQuery(intent);
+	const temporal = buildTemporalParams(intent);
 
 	// The higher-signal providers go first, so a concurrency limit never starves them.
 	if (first && getTavilyKey()) {
-		lanes.push({ variant: first, provider: "tavily", isPrimary: true, news: Boolean(intent.news) });
+		lanes.push({ variant: first, provider: "tavily", isPrimary: true, news: Boolean(intent.news), temporal });
 	}
 
 	if (first && NEWS_RSS_ENABLED && (intent.news || intent.timeSensitive)) {
 		lanes.push({
 			variant: intent.news ? newsQuery : first,
 			provider: "google-news",
+			temporal,
 			isPrimary: true,
 		});
 	}
@@ -1606,7 +1684,7 @@ const buildSearchLanes = (variants, intent) => {
 	variants.forEach((variant, index) => {
 		const isPrimary = index === 0;
 
-		lanes.push({ variant, provider: "ddg-html", isPrimary });
+		lanes.push({ variant, provider: "ddg-html", isPrimary, temporal });
 
 		// The instant-answer endpoint only ever helps the user's own phrasing.
 		if (isPrimary) {
@@ -1623,18 +1701,18 @@ const buildSearchLanes = (variants, intent) => {
 };
 
 const runLane = async (lane, deadline) => {
-	const cacheKey = `${lane.provider}${lane.news ? "-news" : ""}::${lane.variant.toLowerCase()}`;
+	const cacheKey = `${lane.provider}${lane.news ? "-news" : ""}::${lane.variant.toLowerCase()}::${lane.temporal?.key || ""}`;
 
 	return searchCache.resolve(
 		cacheKey,
 		(value) => (Array.isArray(value) && value.length ? SEARCH_CACHE_TTL_MS : EMPTY_CACHE_TTL_MS),
 		async () => {
 			if (lane.provider === "tavily") {
-				return searchTavily(lane.variant, deadline, { news: lane.news });
+				return searchTavily(lane.variant, deadline, { news: lane.news, temporal: lane.temporal });
 			}
 
 			if (lane.provider === "google-news") {
-				return searchGoogleNews(lane.variant, deadline);
+				return searchGoogleNews(lane.variant, deadline, { operator: lane.temporal?.gnews || "" });
 			}
 
 			if (lane.provider === "bing-rss") {
@@ -1653,7 +1731,16 @@ const runLane = async (lane, deadline) => {
 				return searchDuckDuckGoHtml(lane.variant, deadline, { lite: true });
 			}
 
-			return searchDuckDuckGoHtml(lane.variant, deadline);
+			// A df filter would break "site:gov.in" variants, so skip it for those.
+			const recency = /site:/i.test(lane.variant) ? "" : (lane.temporal?.ddg || "");
+			const ddgResults = await searchDuckDuckGoHtml(lane.variant, deadline, { recency });
+
+			// Never end up empty just because of the time filter.
+			if (!ddgResults.length && recency) {
+				return searchDuckDuckGoHtml(lane.variant, deadline);
+			}
+
+			return ddgResults;
 		}
 	);
 };
@@ -1987,9 +2074,21 @@ const extractEvidence = (result, query, intent, maxChars = EVIDENCE_CHARS) => {
  * Ranking
  * ------------------------------------------------------------------------- */
 
-const resolveWeights = (intent) => (intent.timeSensitive
-	? { relevance: 0.40, credibility: 0.22, freshness: 0.30, depth: 0.08 }
-	: { relevance: 0.52, credibility: 0.30, freshness: 0.10, depth: 0.08 });
+const resolveWeights = (intent) => {
+	if (intent.historical) {
+		return { relevance: 0.55, credibility: 0.30, freshness: 0, depth: 0.08 };
+	}
+
+	if (intent.timeSensitive) {
+		const live = intent.news || intent.finance || intent.temporal?.wantsNow;
+
+		return live
+			? { relevance: 0.34, credibility: 0.20, freshness: 0.38, depth: 0.08 }
+			: { relevance: 0.40, credibility: 0.22, freshness: 0.30, depth: 0.08 };
+	}
+
+	return { relevance: 0.52, credibility: 0.30, freshness: 0.10, depth: 0.08 };
+};
 
 const resolveSourceBoost = (result, intent) => {
 	const source = String(result?.source ?? "").toLowerCase();
@@ -2022,6 +2121,45 @@ const resolveSourceBoost = (result, intent) => {
 	return 0;
 };
 
+// Does this result talk about the period the user asked about?
+const scoreTemporalFit = (result, evidence, intent, publishedAtMs) => {
+	const years = intent.temporal?.years || [];
+	const nowYear = new Date().getFullYear();
+	const text = `${result?.title || ""} ${result?.snippet || ""} ${evidence || ""} ${result?.url || ""}`;
+	const mentioned = new Set((text.match(/\b(?:19[9]\d|20\d{2})\b/g) || []).map(Number));
+
+	if (years.length) {
+		const pubYear = publishedAtMs === null ? null : new Date(publishedAtMs).getUTCFullYear();
+		const hit = years.some((y) => mentioned.has(y));
+		const pubFits = pubYear !== null && years.some((y) => pubYear >= y && pubYear <= y + 1);
+
+		if (hit || pubFits) {
+			return 0.14;
+		}
+
+		if (mentioned.size) {
+			return -0.14; // only talks about other years
+		}
+
+		return 0;
+	}
+
+	if (intent.timeSensitive) {
+		const old = [...mentioned].some((y) => y <= nowYear - 2);
+		const recent = [...mentioned].some((y) => y >= nowYear - 1);
+
+		if (old && !recent) {
+			return -0.1;
+		}
+
+		if (recent) {
+			return 0.04;
+		}
+	}
+
+	return 0;
+};
+
 const rankResults = (results, query, intent = classifyQueryIntent(query)) => {
 	const weights = resolveWeights(intent);
 
@@ -2044,7 +2182,7 @@ const rankResults = (results, query, intent = classifyQueryIntent(query)) => {
 
 			let stalenessPenalty = 0;
 
-			if (intent.timeSensitive && ageDays !== null) {
+			if (intent.timeSensitive && !intent.historical && ageDays !== null) {
 				if (ageDays > 400) {
 					stalenessPenalty = 0.16;
 				} else if (ageDays <= 2) {
@@ -2059,6 +2197,7 @@ const rankResults = (results, query, intent = classifyQueryIntent(query)) => {
 				+ resolveSourceBoost(result, intent)
 				+ officialBoost
 				+ providerBoost
+				+ scoreTemporalFit(result, evidence, intent, publishedAtMs)
 				- stalenessPenalty;
 
 			return {
@@ -2225,6 +2364,16 @@ const formatWebSearchContext = (bundle = {}) => {
 	const today = new Date().toISOString().slice(0, 10);
 
 	lines.push(`Web evidence for: "${normalizeText(bundle?.query) || "query"}" | retrieved ${today}${Number.isFinite(Number(bundle?.confidence)) ? ` | confidence ${Number(bundle.confidence).toFixed(2)}` : ""}`);
+
+	if (bundle?.historical && bundle?.temporal?.years?.length) {
+		lines.push(`Time scope: the user asked about ${bundle.temporal.years.join(", ")} (a past period). Answer for that period only, ignore sources describing another period, and do not present today's value as the answer.`);
+	} else if (bundle?.timeSensitive) {
+		lines.push(`Time scope: current. Today is ${today}. Prefer the most recently dated source; if sources conflict, trust the newer one and state its date.`);
+
+		if (Number.isFinite(bundle?.newestAgeDays) && bundle.newestAgeDays > 180) {
+			lines.push(`Warning: the newest dated source is ${Math.round(bundle.newestAgeDays)} days old, so say the information may be out of date.`);
+		}
+	}
 
 	const agreed = Array.isArray(bundle?.consensus?.agreed) ? bundle.consensus.agreed : [];
 	const conflicts = Array.isArray(bundle?.consensus?.conflicts) ? bundle.consensus.conflicts : [];
@@ -2737,6 +2886,13 @@ const searchWebDetailed = async (query, options = {}) => {
 			sources: deduped.slice(0, MAX_RESULTS),
 			rankedSources,
 			consensus,
+			temporal: intent.temporal,
+			historical: intent.historical,
+			timeSensitive: intent.timeSensitive,
+			newestAgeDays: (() => {
+				const ages = rankedSources.slice(0, 5).map((s) => s.ageDays).filter(Number.isFinite);
+				return ages.length ? Math.min(...ages) : null;
+			})(),
 			entities: extractEntities([normalizedQuery, summary].join(" ")),
 			confidence: Number(confidence.toFixed(3)),
 			status: rankedSources.length ? "ok" : "no_results",
