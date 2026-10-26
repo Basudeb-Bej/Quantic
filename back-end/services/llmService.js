@@ -18,6 +18,22 @@ const envList = (name, fallback = "") => String(process.env[name] || fallback)
   .map((entry) => entry.trim())
   .filter(Boolean);
 
+// "model-a=8000,model-b=6000" -> Map(model -> number)
+const parseModelNumberMap = (raw) => {
+  const map = new Map();
+
+  for (const entry of String(raw || "").split(",")) {
+    const [name, value] = entry.split("=");
+    const parsed = Number(value);
+
+    if (name && name.trim() && Number.isFinite(parsed) && parsed > 0) {
+      map.set(name.trim().toLowerCase(), parsed);
+    }
+  }
+
+  return map;
+};
+
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models";
 
@@ -32,6 +48,14 @@ const MAX_TURN_TOKENS = envNumber("GROQ_MAX_TURN_TOKENS", 14000);
 const MAX_CONTINUE_ROUNDS = envNumber("GROQ_MAX_CONTINUE_ROUNDS", 3);
 const CONTINUATION_TAIL_CHARS = envNumber("GROQ_CONTINUATION_TAIL_CHARS", 1800);
 const CONTEXT_DIGEST_CHARS = envNumber("GROQ_CONTEXT_DIGEST_CHARS", 1500);
+
+// When a model rejects a request as too large, the prompt is trimmed and the same
+// model is tried again (up to this many times) before moving to the next model.
+const MAX_SHRINK_ROUNDS = envNumber("GROQ_MAX_SHRINK_ROUNDS", 3);
+
+// If every model is rate limited but the wait is short, wait it out once rather
+// than telling the user to try again.
+const RATE_LIMIT_MAX_WAIT_MS = envNumber("GROQ_RATE_LIMIT_MAX_WAIT_MS", 8000);
 
 const FALLBACK_MODEL = process.env.GROQ_FALLBACK_MODEL || process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 const CHAT_MODEL = process.env.GROQ_CHAT_MODEL || process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -62,6 +86,23 @@ const DEFAULT_MAX_COMPLETION_TOKENS = envNumber("GROQ_DEFAULT_MAX_COMPLETION_TOK
 const PROMPT_TOKEN_SAFETY_MARGIN = 512;
 const CHARS_PER_TOKEN_ESTIMATE = 3.3;
 
+// Tokens-per-minute budgeting. Groq rejects (HTTP 413) any single request whose
+// prompt + max_tokens exceeds the model's TPM limit, and the limits differ per
+// model and per account tier. Rather than hard-coding a table that would be wrong
+// for some accounts, the limit is learned from the first rejection (it is printed
+// in Groq's error message) and remembered for the life of the process. It can
+// also be set up front:  GROQ_TPM_LIMITS="openai/gpt-oss-120b=8000,llama-3.1-8b-instant=6000"
+const TPM_SAFETY_MARGIN = 350;
+const MIN_PROMPT_TOKENS = 600;
+const IMAGE_TOKEN_ESTIMATE = envNumber("GROQ_IMAGE_TOKEN_ESTIMATE", 1500);
+const CONFIGURED_TPM_LIMITS = parseModelNumberMap(process.env.GROQ_TPM_LIMITS);
+const learnedTpmLimits = new Map();
+
+const getTpmLimit = (model) => {
+  const key = String(model || "").trim().toLowerCase();
+  return CONFIGURED_TPM_LIMITS.get(key) || learnedTpmLimits.get(key) || 0;
+};
+
 const logEvent = (event, details = {}) => {
   logger.info(`[llmService] ${event}`, details);
 };
@@ -83,7 +124,53 @@ const isAbortError = (error) => error?.code === "ERR_CANCELED"
   || error?.name === "AbortError"
   || String(error?.message || "").toLowerCase() === "canceled";
 
+// With responseType "stream", axios leaves an error response body as an unread
+// stream, so the status was visible but Groq's explanation (which limit, how many
+// tokens were requested, how long to wait) was not. Read it so the failure can be
+// classified and acted on.
+const hydrateErrorBody = async (error) => {
+  const data = error?.response?.data;
+
+  if (!data || typeof data.on !== "function") {
+    return error;
+  }
+
+  try {
+    const text = await new Promise((resolve) => {
+      const chunks = [];
+      let settled = false;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(Buffer.concat(chunks).toString("utf8"));
+      };
+
+      const timer = setTimeout(finish, 2000);
+
+      data.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      data.on("end", finish);
+      data.on("error", finish);
+    });
+
+    try {
+      error.response.data = JSON.parse(text);
+    } catch {
+      error.response.data = { error: { message: text.slice(0, 500) } };
+    }
+  } catch {
+    // keep the original error untouched
+  }
+
+  return error;
+};
+
 const parseRetryAfterMs = (error) => {
+  if (Number(error?.minRetryAfterMs) > 0) {
+    return Number(error.minRetryAfterMs);
+  }
+
   const header = error?.response?.headers?.["retry-after"];
   const headerSeconds = Number(header);
 
@@ -93,64 +180,85 @@ const parseRetryAfterMs = (error) => {
 
   // Groq usually states the wait inside the message: "try again in 27.5s".
   const message = String(error?.response?.data?.error?.message || "");
-  const match = message.match(/try again in ([\d.]+)\s*(ms|s|m)\b/i);
+  const match = message.match(/try again in\s+(?:(\d+)m)?\s*([\d.]+)\s*(ms|s)\b/i);
 
   if (!match) {
     return 0;
   }
 
-  const value = Number(match[1]);
+  const minutes = Number(match[1] || 0);
+  const value = Number(match[2]);
   if (!Number.isFinite(value)) return 0;
 
-  const unit = match[2].toLowerCase();
-  if (unit === "ms") return Math.round(value);
-  if (unit === "m") return Math.round(value * 60000);
-  return Math.round(value * 1000);
+  const unit = match[3].toLowerCase();
+  const base = unit === "ms" ? value : value * 1000;
+  return Math.round(minutes * 60000 + base);
 };
+
+// "Limit 6000, Requested 9120"  or  "maximum context length is 131072 ... you requested 140000"
+const parseTokenLimits = (message) => {
+  const text = String(message || "");
+  const limit = Number(text.match(/\bLimit\s+(\d+)/i)?.[1])
+    || Number(text.match(/maximum context length is\s+(\d+)/i)?.[1])
+    || 0;
+  const requested = Number(text.match(/\bRequested\s+(\d+)/i)?.[1])
+    || Number(text.match(/you requested (?:about\s+)?(\d+)/i)?.[1])
+    || 0;
+
+  return { limit, requested };
+};
+
+const TOO_LARGE_MESSAGE_PATTERN = /request too large|reduce (?:the length of the messages|your message size)|maximum context length|context_length_exceeded|too many tokens/i;
 
 const describeGroqFailure = (error) => {
   const status = error?.response?.status || 0;
   const groqCode = String(error?.response?.data?.error?.code || "");
   const groqMessage = String(error?.response?.data?.error?.message || "");
   const retryAfterMs = parseRetryAfterMs(error);
+  const { limit, requested } = parseTokenLimits(groqMessage);
+
+  const build = (fields) => ({ limit, requested, ...fields });
 
   if (isAbortError(error)) {
-    return { reason: "client-aborted", retryable: false, retryAfterMs: 0, deadModel: false };
+    return build({ reason: "client-aborted", retryable: false, retryAfterMs: 0, deadModel: false });
   }
 
   if (error?.code === "ECONNABORTED" || error?.code === "ETIMEDOUT" || /timeout/i.test(error?.message || "")) {
-    return { reason: "timeout", retryable: true, retryAfterMs: 0, deadModel: false };
+    return build({ reason: "timeout", retryable: true, retryAfterMs: 0, deadModel: false });
   }
 
   if (error?.code === "ENOTFOUND" || error?.code === "EAI_AGAIN" || error?.code === "ECONNREFUSED" || error?.code === "ECONNRESET") {
-    return { reason: "network", retryable: true, retryAfterMs: 0, deadModel: false };
+    return build({ reason: "network", retryable: true, retryAfterMs: 0, deadModel: false });
   }
 
   if (status === 401 || status === 403) {
-    return { reason: "auth", retryable: false, retryAfterMs: 0, deadModel: false };
+    return build({ reason: "auth", retryable: false, retryAfterMs: 0, deadModel: false });
   }
 
   if (status === 404 || groqCode === "model_not_found" || /does not exist|decommissioned/i.test(groqMessage)) {
-    return { reason: "model-unavailable", retryable: false, retryAfterMs: 0, deadModel: true };
+    return build({ reason: "model-unavailable", retryable: false, retryAfterMs: 0, deadModel: true });
+  }
+
+  // Must be checked before the rate-limit branch: Groq reports an over-sized
+  // request with HTTP 413 (sometimes carrying the code "rate_limit_exceeded"),
+  // and waiting never fixes it - only sending less does.
+  if (status === 413 || groqCode === "request_too_large" || groqCode === "context_length_exceeded" || TOO_LARGE_MESSAGE_PATTERN.test(groqMessage)) {
+    return build({ reason: "request-too-large", retryable: false, retryAfterMs: 0, deadModel: false });
   }
 
   if (status === 429 || groqCode === "rate_limit_exceeded") {
-    return { reason: "rate-limit", retryable: false, retryAfterMs, deadModel: false };
-  }
-
-  if (status === 413 || groqCode === "request_too_large" || groqCode === "context_length_exceeded") {
-    return { reason: "request-too-large", retryable: false, retryAfterMs: 0, deadModel: false };
+    return build({ reason: "rate-limit", retryable: false, retryAfterMs, deadModel: false });
   }
 
   if (status >= 500) {
-    return { reason: "groq-server", retryable: true, retryAfterMs: 0, deadModel: false };
+    return build({ reason: "groq-server", retryable: true, retryAfterMs: 0, deadModel: false });
   }
 
   if (status === 400) {
-    return { reason: "bad-request", retryable: false, retryAfterMs: 0, deadModel: false };
+    return build({ reason: "bad-request", retryable: false, retryAfterMs: 0, deadModel: false });
   }
 
-  return { reason: "unknown", retryable: true, retryAfterMs: 0, deadModel: false };
+  return build({ reason: "unknown", retryable: true, retryAfterMs: 0, deadModel: false });
 };
 
 const logGroqFailure = (label, error) => {
@@ -161,6 +269,22 @@ const logGroqFailure = (label, error) => {
     ...serializeError(error),
   });
   return failure;
+};
+
+// Remember a model's real tokens-per-minute ceiling the first time Groq states it.
+const learnTpmFromError = (model, error, failure) => {
+  const message = String(error?.response?.data?.error?.message || "");
+
+  if (!failure?.limit || !/tokens per minute|\bTPM\b/i.test(message)) {
+    return;
+  }
+
+  const key = String(model || "").trim().toLowerCase();
+
+  if (key && learnedTpmLimits.get(key) !== failure.limit) {
+    learnedTpmLimits.set(key, failure.limit);
+    logEvent("tpm-limit-learned", { model: key, limit: failure.limit });
+  }
 };
 
 // The old single fallback string told the user nothing and told us nothing.
@@ -176,7 +300,7 @@ const buildFallbackReply = (failure = null) => {
   }
 
   if (reason === "request-too-large") {
-    return "That request is too large for me to process in one go. Try shortening the message or removing part of the attachment, then send it again.";
+    return "That request is still too large for the AI service's current limits, even after I trimmed the background context. Try a shorter message, or start a new chat and send it again.";
   }
 
   if (reason === "auth") {
@@ -326,58 +450,164 @@ const squeezeText = (text, maxChars, note = "content trimmed to fit the token bu
   ].join("");
 };
 
-const truncatePromptForModel = (prompt, model, reservedCompletionTokens = 0) => {
-  const normalizedPrompt = String(prompt ?? "");
-  const { context } = getModelLimits(model);
-  const contextBudget = Math.max(1000, context - reservedCompletionTokens - PROMPT_TOKEN_SAFETY_MARGIN);
-  const tokenBudget = Math.max(1000, Math.min(contextBudget, MAX_PROMPT_TOKENS));
-  const charBudget = Math.floor(tokenBudget * CHARS_PER_TOKEN_ESTIMATE);
+const keepHeadText = (text, maxChars, note) => {
+  const str = String(text ?? "");
+  if (str.length <= maxChars) return str;
+  return `${str.slice(0, Math.max(0, maxChars)).replace(/\s+$/, "")}\n...[${note}]...`;
+};
 
-  if (estimateTokenCount(normalizedPrompt) <= tokenBudget) {
-    return normalizedPrompt;
+const keepTailText = (text, maxChars, note) => {
+  const str = String(text ?? "");
+  if (str.length <= maxChars) return str;
+  return `...[${note}]...\n${str.slice(str.length - Math.max(0, maxChars)).replace(/^\s+/, "")}`;
+};
+
+/* ------------------------------------------------------------------ *
+ * 3b. Fitting a prompt into a token budget
+ *
+ * The prompt is assembled from titled sections (see ragPipeline.formatPrompt).
+ * The old code cut the middle out of the whole string, which could slice a web
+ * source in half or drop the conversation unpredictably. Now the least valuable
+ * sections give way first, and the user's question, the system identity, the
+ * citation rules and the web evidence are protected for as long as possible.
+ * ------------------------------------------------------------------ */
+
+const PROMPT_SECTION_HEADINGS = [
+  "System Identity",
+  "User Profile",
+  "User Memory",
+  "RAG Context",
+  "Citation Format — MANDATORY",
+  "Conversation History",
+  "Attachments",
+  "Attachment Analysis",
+  "Attachment Response Guidance",
+  "User",
+];
+
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const parsePromptSections = (prompt) => {
+  const text = String(prompt ?? "");
+  const pattern = new RegExp(`(^|\\n\\n)(${PROMPT_SECTION_HEADINGS.map(escapeRegExp).join("|")})\\n`, "g");
+  const marks = [];
+  let match;
+
+  while ((match = pattern.exec(text))) {
+    marks.push({
+      heading: match[2],
+      start: match.index + match[1].length,
+      bodyStart: match.index + match[0].length,
+    });
   }
 
-  const sectionMatch = normalizedPrompt.match(/(Attachment Analysis\n)([\s\S]*?)(\n\n[A-Z][^\n]*\n|$)/);
+  return marks.map((mark, index) => ({
+    ...mark,
+    end: index + 1 < marks.length ? Math.max(mark.bodyStart, marks[index + 1].start - 2) : text.length,
+  }));
+};
 
-  if (sectionMatch) {
-    const [fullMatch, header, sectionBody, tail] = sectionMatch;
-    const sectionStart = normalizedPrompt.indexOf(fullMatch);
-    const before = normalizedPrompt.slice(0, sectionStart);
-    const after = normalizedPrompt.slice(sectionStart + fullMatch.length);
-    const nonSectionChars = before.length + after.length + header.length + tail.length;
-    const allowedSectionChars = Math.max(2000, charBudget - nonSectionChars);
+const SHRINK_STEPS = [
+  { heading: "Conversation History", mode: "tail", min: 500, note: "older conversation omitted" },
+  { heading: "RAG Context", mode: "docs", min: 600, note: "retrieved documents trimmed" },
+  { heading: "User Memory", mode: "head", min: 400, note: "memory trimmed" },
+  { heading: "User Profile", mode: "head", min: 300, note: "profile trimmed" },
+  { heading: "Attachment Analysis", mode: "squeeze", min: 2000, note: "the attachment is larger than shown" },
+  { heading: "Conversation History", mode: "tail", min: 0, note: "older conversation omitted" },
+  { heading: "RAG Context", mode: "squeeze", min: 2600, note: "context trimmed to fit the token budget" },
+];
 
-    if (sectionBody.length > allowedSectionChars) {
-      const squeezedBody = squeezeText(
-        sectionBody,
-        allowedSectionChars,
-        "the attachment is larger than shown"
-      );
+const applyShrinkStep = (prompt, step, tokenBudget) => {
+  const sections = parsePromptSections(prompt);
+  const section = sections.find((entry) => entry.heading === step.heading);
 
-      logEvent("truncatePromptForModel:attachment-section", {
-        model,
-        omittedChars: sectionBody.length - allowedSectionChars,
-        tokenBudget,
-      });
+  if (!section) {
+    return prompt;
+  }
 
-      const rebuilt = before + header + squeezedBody + tail + after;
+  const body = prompt.slice(section.bodyStart, section.end);
+  const excessChars = Math.ceil((estimateTokenCount(prompt) - tokenBudget) * CHARS_PER_TOKEN_ESTIMATE);
 
-      if (estimateTokenCount(rebuilt) <= tokenBudget) {
-        return rebuilt;
-      }
+  if (excessChars <= 0 || !body) {
+    return prompt;
+  }
 
-      return squeezeText(rebuilt, charBudget, "input longer than the token budget");
+  let nextBody = body;
+
+  if (step.mode === "docs") {
+    // Drop retrieved documents first; Tool Context and Web Context stay intact.
+    const liveIndex = body.search(/(?:^|\n\n)(?:Tool|Web) Context:/);
+    const docsEnd = liveIndex > 0 ? liveIndex : body.length;
+    const docs = body.slice(0, docsEnd);
+    const rest = body.slice(docsEnd);
+
+    if (liveIndex > 0) {
+      const nextDocsLength = Math.max(0, docs.length - excessChars);
+      const trimmedDocs = nextDocsLength > 0 ? keepHeadText(docs, nextDocsLength, step.note) : "";
+      nextBody = `${trimmedDocs}${rest}`.replace(/^\s+/, "");
+    } else {
+      nextBody = keepHeadText(body, Math.max(step.min, body.length - excessChars), step.note);
     }
+  } else if (step.mode === "tail") {
+    nextBody = keepTailText(body, Math.max(step.min, body.length - excessChars), step.note);
+  } else if (step.mode === "head") {
+    nextBody = keepHeadText(body, Math.max(step.min, body.length - excessChars), step.note);
+  } else {
+    nextBody = squeezeText(body, Math.max(step.min, body.length - excessChars), step.note);
   }
 
-  logEvent("truncatePromptForModel:whole-prompt", {
+  if (nextBody.length >= body.length) {
+    return prompt;
+  }
+
+  return prompt.slice(0, section.bodyStart) + nextBody + prompt.slice(section.end);
+};
+
+const fitPromptToBudget = (prompt, tokenBudget, model = "") => {
+  let current = String(prompt ?? "");
+  const startingTokens = estimateTokenCount(current);
+
+  if (startingTokens <= tokenBudget) {
+    return current;
+  }
+
+  for (const step of SHRINK_STEPS) {
+    if (estimateTokenCount(current) <= tokenBudget) {
+      break;
+    }
+
+    current = applyShrinkStep(current, step, tokenBudget);
+  }
+
+  if (estimateTokenCount(current) > tokenBudget) {
+    const charBudget = Math.floor(tokenBudget * CHARS_PER_TOKEN_ESTIMATE);
+    current = squeezeText(current, charBudget, "input longer than the token budget");
+  }
+
+  logEvent("fitPromptToBudget", {
     model,
-    originalChars: normalizedPrompt.length,
-    charBudget,
     tokenBudget,
+    fromTokens: startingTokens,
+    toTokens: estimateTokenCount(current),
   });
 
-  return squeezeText(normalizedPrompt, charBudget, "input longer than the token budget");
+  return current;
+};
+
+const resolvePromptTokenBudget = ({ model, completionTokens, overheadTokens = 0, cap = 0 }) => {
+  const { context } = getModelLimits(model);
+  let budget = Math.min(context - completionTokens - overheadTokens - PROMPT_TOKEN_SAFETY_MARGIN, MAX_PROMPT_TOKENS);
+
+  const tpm = getTpmLimit(model);
+  if (tpm) {
+    budget = Math.min(budget, tpm - completionTokens - overheadTokens - TPM_SAFETY_MARGIN);
+  }
+
+  if (cap) {
+    budget = Math.min(budget, cap);
+  }
+
+  return Math.max(MIN_PROMPT_TOKENS, Math.floor(budget));
 };
 
 /* ------------------------------------------------------------------ *
@@ -849,7 +1079,7 @@ const createTurnBudget = (limit = MAX_TURN_TOKENS) => ({
   limit,
   spent: 0,
   charge(promptText, completionTokens) {
-  
+
     const promptTokens = Math.min(
       estimateTokenCount(promptText),
       MAX_PROMPT_TOKENS + PROMPT_TOKEN_SAFETY_MARGIN
@@ -869,10 +1099,11 @@ const BASE_SYSTEM_RULES = [
   "You are Quantic AI, a production-style assistant.",
   "Quantic AI was created and is developed by Basudeb Bej. If asked who built, created, or founded Quantic AI, always answer with this fact and never invent another name.",
   "Answer the question that was actually asked. Lead with the direct answer, then support it.",
-  "Interpret obvious spelling mistakes and phonetic typos from context when the intended word or entity is unambiguous (for example, 'Rassia' means 'Russia'); answer the intended question instead of treating the typo as an unknown entity. If genuinely ambiguous, ask one short clarification question.",
+  "Interpret obvious spelling mistakes and phonetic typos from context when the intended word or entity is unambiguous (for example, 'Rassia' means 'Russia', 'chef menester' means 'chief minister'); answer the intended question instead of treating the typo as an unknown entity or commenting on the misspelling. If genuinely ambiguous, ask one short clarification question.",
   "When a user asks to detect, check, or correct spelling errors, explicitly proofread the supplied text and any successfully extracted attachment text. Report the original phrase, correction, and a short reason; never claim to have checked content that could not be extracted.",
   "Treat User Profile and Conversation Context as trusted context before guessing.",
-  "Treat Web Search as trusted current public context when it is provided.",
+  "Treat Web Search as trusted current public context when it is provided. When Web Context contains relevant sources, answer from them directly and confidently; do not fall back on older memory or add 'as of 2023' style caveats that the sources contradict.",
+  "Earlier assistant replies in the conversation can be wrong or out of date. Never treat them as evidence; if an earlier reply said something could not be verified, re-check it against the current Web Context.",
   "If Web Context is missing or says WEB_SEARCH_FAILED, do not fabricate current facts — say you could not find reliable recent information.",
   "Resolve follow-ups such as 'me', 'about me', 'say my name', 'that one', or 'the second option' from the prior conversation instead of asking what the user means.",
   "If the context does not answer the question, say so plainly and still give the best answer you can from general knowledge, labelling which part is general knowledge.",
@@ -958,6 +1189,20 @@ const buildSystemMessages = (profile, options = {}) => {
   return messages;
 };
 
+// Everything in the request except the prompt itself. It counts against the
+// tokens-per-minute limit just the same, and the old truncation ignored it.
+const estimateRequestOverhead = (profile, options = {}) => {
+  const systemText = buildSystemMessages(profile, options).map((entry) => entry.content).join("\n");
+  const historyText = Array.isArray(options?.messages)
+    ? options.messages.filter((entry) => entry && typeof entry.content === "string").map((entry) => entry.content).join("\n")
+    : "";
+  const imageCount = Array.isArray(options?.visionImages)
+    ? Math.min(3, options.visionImages.filter((image) => typeof image?.dataUrl === "string").length)
+    : 0;
+
+  return estimateTokenCount(systemText) + estimateTokenCount(historyText) + (imageCount * IMAGE_TOKEN_ESTIMATE);
+};
+
 const applyReasoningControls = (data, model, profile = null) => {
   const normalizedModel = String(model || "").toLowerCase();
 
@@ -1017,10 +1262,35 @@ const buildChatMessages = ({ prompt, profile, options = {} }) => {
   return [...systemMessages, { role: "user", content: currentUserContent }];
 };
 
-const buildChatRequest = ({ prompt, stream, model, maxTokens, profile, options = {}, signal = null }) => {
+// `shrink` ({ promptCap, completionCap }) is supplied by the model chain after a
+// "request too large" rejection and tightens the budget for the retry.
+const buildChatRequest = ({ prompt, stream, model, maxTokens, profile, options = {}, signal = null, shrink = null }) => {
   const resolvedModel = model || CHAT_MODEL;
-  const requestedMaxTokens = clampCompletionTokens(resolvedModel, maxTokens || resolveMaxTokens(profile));
-  const safePrompt = truncatePromptForModel(prompt, resolvedModel, requestedMaxTokens);
+  let requestedMaxTokens = clampCompletionTokens(resolvedModel, maxTokens || resolveMaxTokens(profile));
+
+  if (shrink?.completionCap) {
+    requestedMaxTokens = Math.max(256, Math.min(requestedMaxTokens, shrink.completionCap));
+  }
+
+  const overheadTokens = estimateRequestOverhead(profile, options);
+  const tpm = getTpmLimit(resolvedModel);
+
+  // Leave the prompt a workable share of the per-minute allowance.
+  if (tpm) {
+    const room = tpm - overheadTokens - TPM_SAFETY_MARGIN;
+
+    if (room - requestedMaxTokens < MIN_PROMPT_TOKENS * 2) {
+      requestedMaxTokens = Math.max(256, Math.min(requestedMaxTokens, room - (MIN_PROMPT_TOKENS * 2)));
+    }
+  }
+
+  const tokenBudget = resolvePromptTokenBudget({
+    model: resolvedModel,
+    completionTokens: requestedMaxTokens,
+    overheadTokens,
+    cap: shrink?.promptCap || 0,
+  });
+  const safePrompt = fitPromptToBudget(prompt, tokenBudget, resolvedModel);
   const sampling = resolveSampling(profile);
 
   const data = applyReasoningControls(
@@ -1052,6 +1322,9 @@ const buildChatRequest = ({ prompt, stream, model, maxTokens, profile, options =
     request.signal = signal;
   }
 
+  // Non-enumerable so axios never sees it; the chain reads it back to size the retry.
+  Object.defineProperty(request, "__promptTokens", { value: estimateTokenCount(safePrompt), enumerable: false });
+
   return request;
 };
 
@@ -1071,6 +1344,7 @@ const requestWithRetry = async (requestFactory, label) => {
       return await axios(request);
     } catch (error) {
       lastError = error;
+      await hydrateErrorBody(error);
       const failure = logGroqFailure(`${label}:attempt-${attempt}`, error);
 
       if (failure.reason === "client-aborted") {
@@ -1101,40 +1375,160 @@ const requestWithRetry = async (requestFactory, label) => {
   throw lastError;
 };
 
-// Walks the model chain. Because Groq's rate limits are per model, a 429 on the
-// preferred model is a reason to try the next one immediately rather than to
-// give up on the turn — which is what the old single-fallback path did.
-const requestWithModelChain = async ({ models, label, buildRequest }) => {
-  const chain = (models || []).filter(isModelUsable);
-  const candidates = chain.length ? chain : [FALLBACK_MODEL];
-  let lastError;
+// How much less to send after a "request too large" rejection. Groq's message
+// states the limit and the size that was requested, so the overflow is exact;
+// without it the prompt is simply cut to 60%.
+const computeShrink = (error, sentRequest) => {
+  const failure = describeGroqFailure(error);
+  const sentPromptTokens = Number(sentRequest?.__promptTokens) || 0;
+  const sentCompletion = Number(sentRequest?.data?.max_tokens) || 0;
 
-  for (const model of candidates) {
-    try {
-      const response = await requestWithRetry(() => buildRequest(model), `${label}:${model}`);
-      return { response, model };
-    } catch (error) {
-      lastError = error;
-      const failure = describeGroqFailure(error);
+  let promptCap;
 
-      if (failure.reason === "client-aborted") {
-        throw error;
-      }
-
-      if (failure.deadModel) {
-        markModelDead(model, failure.reason);
-      }
-
-      if (failure.reason === "auth") {
-        // Every model shares the key. Trying more of them cannot help.
-        throw error;
-      }
-
-      logEvent(`${label}:model-failed`, { model, reason: failure.reason, next: candidates[candidates.indexOf(model) + 1] || null });
-    }
+  if (failure.limit && failure.requested && sentPromptTokens) {
+    const overflow = (failure.requested - failure.limit) + TPM_SAFETY_MARGIN;
+    promptCap = sentPromptTokens - overflow;
+  } else if (sentPromptTokens) {
+    promptCap = Math.floor(sentPromptTokens * 0.6);
+  } else {
+    promptCap = 1500;
   }
 
-  throw lastError;
+  if (sentPromptTokens) {
+    promptCap = Math.min(promptCap, Math.floor(sentPromptTokens * 0.9));
+  }
+
+  promptCap = Math.max(MIN_PROMPT_TOKENS, promptCap);
+
+  // When the prompt cannot shrink much further, the completion allowance has to
+  // give way as well, since max_tokens counts against the same limit.
+  const completionCap = promptCap <= MIN_PROMPT_TOKENS * 1.5 && sentCompletion
+    ? Math.max(256, Math.floor(sentCompletion * 0.6))
+    : null;
+
+  return { promptCap, completionCap };
+};
+
+const FAILURE_PRIORITY = ["rate-limit", "request-too-large", "model-unavailable", "timeout", "network", "groq-server", "bad-request", "unknown"];
+
+// The old chain surfaced whichever model failed last, so a transient failure on
+// the final model hid the real, more actionable one (for example a rate limit
+// with a stated wait). Report the most informative failure instead.
+const pickBestFailure = (failures) => {
+  if (!failures.length) {
+    return new Error("No usable model was available for this request.");
+  }
+
+  const rank = (entry) => {
+    const index = FAILURE_PRIORITY.indexOf(entry.failure.reason);
+    return index === -1 ? FAILURE_PRIORITY.length : index;
+  };
+
+  const best = [...failures].sort((left, right) => rank(left) - rank(right))[0];
+  const waits = failures
+    .filter((entry) => entry.failure.reason === "rate-limit" && entry.failure.retryAfterMs > 0)
+    .map((entry) => entry.failure.retryAfterMs);
+
+  if (best.failure.reason === "rate-limit" && waits.length) {
+    best.error.minRetryAfterMs = Math.min(...waits);
+  }
+
+  return best.error;
+};
+
+// Walks the model chain. Because Groq's rate limits are per model, a 429 on the
+// preferred model is a reason to try the next one immediately rather than to
+// give up on the turn. A "request too large" rejection first retries the SAME
+// model with a smaller prompt, because the content is rarely the problem - the
+// per-minute token ceiling is.
+const requestWithModelChain = async ({ models, label, buildRequest, signal = null }) => {
+  const chain = (models || []).filter(isModelUsable);
+  const candidates = chain.length ? chain : [FALLBACK_MODEL];
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const failures = [];
+
+    for (const model of candidates) {
+      if (!isModelUsable(model)) {
+        continue;
+      }
+
+      let shrink = null;
+
+      for (let round = 0; round <= MAX_SHRINK_ROUNDS; round += 1) {
+        let sentRequest = null;
+
+        try {
+          const response = await requestWithRetry(() => {
+            sentRequest = buildRequest(model, shrink);
+            return sentRequest;
+          }, `${label}:${model}`);
+
+          return { response, model };
+        } catch (error) {
+          const failure = describeGroqFailure(error);
+
+          if (failure.reason === "client-aborted") {
+            throw error;
+          }
+
+          learnTpmFromError(model, error, failure);
+
+          if (failure.deadModel) {
+            markModelDead(model, failure.reason);
+          }
+
+          if (failure.reason === "auth") {
+            // Every model shares the key. Trying more of them cannot help.
+            throw error;
+          }
+
+          if (failure.reason === "request-too-large" && round < MAX_SHRINK_ROUNDS) {
+            shrink = computeShrink(error, sentRequest);
+            logEvent(`${label}:shrinking-prompt`, {
+              model,
+              round: round + 1,
+              limit: failure.limit || null,
+              requested: failure.requested || null,
+              promptCap: shrink.promptCap,
+              completionCap: shrink.completionCap,
+            });
+            continue;
+          }
+
+          failures.push({ model, error, failure });
+          logEvent(`${label}:model-failed`, {
+            model,
+            reason: failure.reason,
+            next: candidates[candidates.indexOf(model) + 1] || null,
+          });
+          break;
+        }
+      }
+    }
+
+    const rateLimited = failures.filter((entry) => entry.failure.reason === "rate-limit");
+    const waits = rateLimited.map((entry) => entry.failure.retryAfterMs).filter((value) => value > 0);
+    const shortestWait = waits.length ? Math.min(...waits) : 0;
+
+    // Every model said "slow down" and the wait is short: wait it out once.
+    if (pass === 0 && failures.length > 0 && rateLimited.length === failures.length && shortestWait > 0 && shortestWait <= RATE_LIMIT_MAX_WAIT_MS && !signal?.aborted) {
+      logEvent(`${label}:waiting-out-rate-limit`, { waitMs: shortestWait });
+      await delay(shortestWait + 250);
+
+      if (signal?.aborted) {
+        const abortError = new Error("canceled");
+        abortError.code = "ERR_CANCELED";
+        throw abortError;
+      }
+
+      continue;
+    }
+
+    throw pickBestFailure(failures);
+  }
+
+  throw new Error("No usable model was available for this request.");
 };
 
 /* ------------------------------------------------------------------ *
@@ -1243,6 +1637,7 @@ const completeResponse = async ({ query, prompt, initialContent, model, profile,
       const { response } = await requestWithModelChain({
         models: [model, CHAT_MODEL, FALLBACK_MODEL, FAST_MODEL],
         label: "completeResponse",
+        signal,
         buildRequest: (candidateModel) => buildContinuationRequest({
           query,
           contextDigest,
@@ -1503,6 +1898,7 @@ const reflectAnswer = async ({
     const { response, model: usedModel } = await requestWithModelChain({
       models: [model || REFLECTION_MODEL, CHAT_MODEL, FALLBACK_MODEL, FAST_MODEL],
       label: "reflectAnswer",
+      signal,
       buildRequest: (candidateModel) => buildReflectionRequest({
         query,
         draftAnswer: draft,
@@ -1669,7 +2065,8 @@ const generateGroqResponse = async (prompt, query, model, options = {}) => {
     const { response, model: usedModel } = await requestWithModelChain({
       models,
       label: "generateGroqResponse",
-      buildRequest: (candidateModel) => buildChatRequest({
+      signal,
+      buildRequest: (candidateModel, shrink) => buildChatRequest({
         prompt,
         stream: false,
         model: candidateModel,
@@ -1677,6 +2074,7 @@ const generateGroqResponse = async (prompt, query, model, options = {}) => {
         profile,
         options,
         signal,
+        shrink,
       }),
     });
 
@@ -1692,7 +2090,8 @@ const generateGroqResponse = async (prompt, query, model, options = {}) => {
       const retry = await requestWithModelChain({
         models: [FAST_MODEL, FALLBACK_MODEL],
         label: "generateGroqResponse:retry",
-        buildRequest: (candidateModel) => buildChatRequest({
+        signal,
+        buildRequest: (candidateModel, shrink) => buildChatRequest({
           prompt,
           stream: false,
           model: candidateModel,
@@ -1700,6 +2099,7 @@ const generateGroqResponse = async (prompt, query, model, options = {}) => {
           profile,
           options,
           signal,
+          shrink,
         }),
       });
 
@@ -1811,7 +2211,8 @@ const streamGroqResponse = async (prompt, res, query, model, options = {}) => {
     const { response, model: usedModel } = await requestWithModelChain({
       models,
       label: "streamGroqResponse",
-      buildRequest: (candidateModel) => buildChatRequest({
+      signal: controller.signal,
+      buildRequest: (candidateModel, shrink) => buildChatRequest({
         prompt,
         stream: true,
         model: candidateModel,
@@ -1819,6 +2220,7 @@ const streamGroqResponse = async (prompt, res, query, model, options = {}) => {
         profile,
         options,
         signal: controller.signal,
+        shrink,
       }),
     });
 
@@ -2444,4 +2846,8 @@ module.exports = {
   stitchContinuation,
   buildFallbackReply,
   describeGroqFailure,
+  // Additive exports - nothing existing depends on them.
+  fitPromptToBudget,
+  parsePromptSections,
+  parseTokenLimits,
 };
