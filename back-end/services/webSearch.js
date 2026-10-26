@@ -2293,6 +2293,19 @@ const emptyBundle = (query, status) => ({
 	status,
 });
 
+/* ------------------------------------------------------------------------- *
+ * Citation link resolution
+ *
+ * Goal: clicking a "[Source N]" badge must open the real article/website, never
+ * a search page. Link kinds produced here:
+ *   article   - the real, verified publisher article URL
+ *   redirect  - an undecodable Google News link; a browser opens the real
+ *               article through it (Google News redirects to the publisher)
+ *   publisher - the publisher's own site (only when the article itself is dead)
+ *   none      - no usable link
+ * A Google *search* URL is never produced any more.
+ * ------------------------------------------------------------------------- */
+
 const LINK_VERIFY_ENABLED = process.env.WEB_LINK_VERIFY !== "0";
 const LINK_CHECK_TIMEOUT_MS = Number(process.env.WEB_LINK_CHECK_TIMEOUT_MS || 3500);
 const GOOGLE_DECODE_TIMEOUT_MS = Number(process.env.WEB_LINK_DECODE_TIMEOUT_MS || 5000);
@@ -2434,7 +2447,7 @@ const decodeGoogleNewsViaNetwork = async (id) => {
 	}
 
 	if (!signature || !timestamp) {
-		warnThrottled("gnews-decode-page", `[webSearch] Could not decode Google News links (${note}); falling back to headline-search links. Setting TAVILY_API_KEY avoids Google News links entirely.`);
+		warnThrottled("gnews-decode-page", `[webSearch] Could not decode Google News links (${note}); keeping the Google News redirect link, which still opens the article. Setting TAVILY_API_KEY avoids Google News links entirely.`);
 		return "";
 	}
 
@@ -2458,14 +2471,14 @@ const decodeGoogleNewsViaNetwork = async (id) => {
 	}, GOOGLE_DECODE_TIMEOUT_MS, null);
 
 	if (!response.ok) {
-		warnThrottled("gnews-decode-api", "[webSearch] Google News link decoder was refused; falling back to headline-search links.", { status: response.status });
+		warnThrottled("gnews-decode-api", "[webSearch] Google News link decoder was refused; keeping the Google News redirect link.", { status: response.status });
 		return "";
 	}
 
 	const decoded = parseGoogleNewsBatchResponse(await response.text());
 
 	if (!decoded) {
-		warnThrottled("gnews-decode-parse", "[webSearch] Google News link decoder answered in an unexpected format; falling back to headline-search links.");
+		warnThrottled("gnews-decode-parse", "[webSearch] Google News link decoder answered in an unexpected format; keeping the Google News redirect link.");
 	}
 
 	return decoded;
@@ -2518,31 +2531,26 @@ const verifyLiveUrl = async (value) => {
 	}
 };
 
-// A Google search for the exact headline, limited to the publisher's site. It loads
-// every time and puts the article first, which beats dropping people on a home page.
-const headlineSearchUrl = (result) => {
-	const title = normalizeText(result?.title).replace(/"/g, "").slice(0, 160);
-
-	if (!title) {
-		return "";
-	}
-
-	const host = getDomain(result?.publisherUrl) || (isGoogleNewsArticleUrl(result?.url) ? "" : getDomain(result?.url));
-	const scope = host ? ` site:${host}` : (result?.publisher ? ` ${normalizeText(result.publisher)}` : "");
-
-	return `https://www.google.com/search?q=${encodeURIComponent(`"${title}"${scope}`)}`;
-};
-
+// Used only when a direct article link could not be produced. It NEVER returns a
+// Google search page - users must land on the source website itself:
+//   1. An undecoded Google News link: keep it. Opening it in a browser redirects
+//      straight to the publisher's article, so it is still a direct route.
+//   2. A confirmed-dead article (404/410): fall back to the publisher's own site.
+//   3. Otherwise keep whatever URL the search provider gave us.
 const fallbackLinkFor = (result) => {
-	const search = headlineSearchUrl(result);
+	const original = String(result?.url || "");
 
-	if (search) {
-		return { url: search, kind: "search" };
+	if (original && isGoogleNewsArticleUrl(original)) {
+		return { url: original, kind: "redirect" };
 	}
 
-	const origin = originOf(result?.publisherUrl) || (isGoogleNewsArticleUrl(result?.url) ? "" : originOf(result?.url));
+	const origin = originOf(result?.publisherUrl) || originOf(original);
 
-	return origin ? { url: origin, kind: "publisher" } : { url: "", kind: "none" };
+	if (origin) {
+		return { url: origin, kind: "publisher" };
+	}
+
+	return original ? { url: original, kind: "article" } : { url: "", kind: "none" };
 };
 
 // One shared promise per link: the early prefetch and the final pass never repeat work.
@@ -2600,7 +2608,7 @@ const prefetchSourceLinks = (sources) => {
 };
 
 // Mutates the given result objects. Whatever happens (budget hit, network down),
-// no unresolved Google redirect link is ever left in place.
+// the link left in place is always a real destination, never a search page.
 const resolveSourceLinks = async (sources) => {
 	if (!LINK_VERIFY_ENABLED || !Array.isArray(sources) || !sources.length) {
 		return sources;
@@ -2634,7 +2642,7 @@ const resolveSourceLinks = async (sources) => {
 	clearTimeout(timer);
 	state.closed = true;
 
-	const counts = { article: 0, search: 0, publisher: 0, none: 0 };
+	const counts = { article: 0, redirect: 0, publisher: 0, none: 0 };
 
 	for (const result of sources) {
 		if (result?.url && !result.linkKind) {
@@ -2647,7 +2655,7 @@ const resolveSourceLinks = async (sources) => {
 	}
 
 	if (SEARCH_DEBUG) {
-		logger.log(`[webSearch] links article=${counts.article} search=${counts.search} publisher=${counts.publisher} none=${counts.none}`);
+		logger.log(`[webSearch] links article=${counts.article} redirect=${counts.redirect} publisher=${counts.publisher} none=${counts.none}`);
 	}
 
 	return sources;
@@ -2779,4 +2787,3 @@ module.exports = {
 	searchBingRss,
 	parseRssItems,
 };
-
