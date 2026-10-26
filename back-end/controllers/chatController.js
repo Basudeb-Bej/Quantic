@@ -299,20 +299,6 @@ const isOfficeDocumentAttachment = (attachment) => {
 	return (OFFICE_DOCUMENT_MIME_TYPES.has(mimeType) || OFFICE_DOCUMENT_EXTENSIONS.has(extension)) && normalizeText(attachment?.dataUrl).startsWith("data:");
 };
 
-// const isTextAttachment = (attachment) => {
-// 	const mimeType = String(attachment?.type || "").toLowerCase();
-
-// 	return (
-// 		mimeType.startsWith("text/") ||
-// 		mimeType === "application/json" ||
-// 		mimeType === "application/xml" ||
-// 		mimeType === "application/xhtml+xml" ||
-// 		mimeType === "application/csv" ||
-// 		mimeType === "text/csv"
-// 	) && normalizeText(attachment?.dataUrl).startsWith("data:");
-// };
-
-// AFTER
 const isTextAttachment = (attachment) => {
 	const mimeType = String(attachment?.type || "").toLowerCase();
 	const hasDataUrl = normalizeText(attachment?.dataUrl).startsWith("data:");
@@ -417,13 +403,6 @@ const buildDocumentAttachmentAnalysis = async (attachment, index) => {
 			const pdf = await pdfParser.getText();
 			const extractedText = normalizeText(pdf?.text || "").replace(/\s+/g, " ").trim();
 
-			// if (extractedText.length >= 40) {
-			// 	return [
-			// 		`PDF ${index + 1}${attachment.name ? ` (${attachment.name})` : ""}`,
-			// 		`Extracted text: ${extractedText.slice(0, 6000)}`,
-			// 	].join("\n");
-			// }
-
 			if (extractedText.length >= 40) {
 				return [
 					`PDF ${index + 1}${attachment.name ? ` (${attachment.name})` : ""}`,
@@ -499,11 +478,6 @@ const buildDocumentAttachmentAnalysis = async (attachment, index) => {
 				return `${attachment.name || `Attachment ${index + 1}`}: no readable text was extracted.`;
 			}
 
-			// return [
-			// 	`${attachment.name || `Attachment ${index + 1}`}`,
-			// 	`Extracted text: ${extractedText.slice(0, 4000)}`,
-			// ].join("\n");
-
 			return [
 				`${attachment.name || `Attachment ${index + 1}`}`,
 				`Extracted text: ${extractedText.slice(0, 16000)}`,
@@ -514,7 +488,6 @@ const buildDocumentAttachmentAnalysis = async (attachment, index) => {
 		}
 	}
 
-	// AFTER
 	if (isTextAttachment(attachment)) {
 		const isCode = isCodeFileAttachment(attachment);
 		const rawText = parsed.buffer.toString("utf8");
@@ -573,8 +546,6 @@ const buildAttachmentAnalysis = async (attachments = []) => {
 
 	return analysis.filter(Boolean).join("\n\n");
 };
-
-//const isGreetingMessage = (message) => /\b(hello|hi|hey|good morning|good afternoon|good evening|how are you)\b/i.test(normalizeText(message));
 
 const GREETING_ONLY_PHRASES = new Set([
 	"hi", "hii", "hiya", "hey", "hello", "yo",
@@ -670,18 +641,66 @@ const buildGreetingReply = (timeZone) => `${getTimeOfDayGreeting(new Date(), tim
 
 const buildCreatorReply = () => "I was created by Basudeb Bej, the developer behind Quantic AI. I help with writing, coding, learning, and problem-solving.";
 
+// ---------------------------------------------------------------------------
+// Conversation history budget.
+// Every earlier turn is re-sent with each request, and a previous answer can be
+// long (or contain a whole web summary). Left unbounded, history plus web context
+// is what pushed requests past the model's per-minute token limit, so each entry
+// and the total are capped. The newest turns are always kept.
+// ---------------------------------------------------------------------------
+const MAX_HISTORY_ENTRY_CHARS = Number(process.env.CHAT_HISTORY_ENTRY_CHARS || 900);
+const MAX_HISTORY_TOTAL_CHARS = Number(process.env.CHAT_HISTORY_TOTAL_CHARS || 4500);
+
+const clipHistoryText = (text, maxChars) => {
+	const value = String(text ?? "");
+
+	if (value.length <= maxChars) {
+		return value;
+	}
+
+	const head = Math.floor(maxChars * 0.65);
+	const tail = Math.floor(maxChars * 0.25);
+	return `${value.slice(0, head).trim()} ... ${value.slice(value.length - tail).trim()}`;
+};
+
+const capConversationEntries = (entries) => {
+	const list = Array.isArray(entries) ? entries : [];
+	const clipped = list.map((entry) => ({
+		...entry,
+		content: clipHistoryText(normalizeText(entry?.content), MAX_HISTORY_ENTRY_CHARS),
+	}));
+
+	const kept = [];
+	let total = 0;
+
+	for (let index = clipped.length - 1; index >= 0; index -= 1) {
+		const length = clipped[index].content.length;
+
+		if (kept.length && total + length > MAX_HISTORY_TOTAL_CHARS) {
+			break;
+		}
+
+		kept.unshift(clipped[index]);
+		total += length;
+	}
+
+	return kept;
+};
+
 const normalizeConversation = (conversation) => {
 	if (!Array.isArray(conversation)) {
 		return [];
 	}
 
-	return conversation
-		.slice(-10)
-		.map((entry) => ({
-			role: normalizeText(entry?.role),
-			content: normalizeText(stripSourcesMarker(entry?.content)),
-		}))
-		.filter((entry) => entry.role && entry.content);
+	return capConversationEntries(
+		conversation
+			.slice(-10)
+			.map((entry) => ({
+				role: normalizeText(entry?.role),
+				content: normalizeText(stripSourcesMarker(entry?.content)),
+			}))
+			.filter((entry) => entry.role && entry.content)
+	);
 };
 
 const isValidUserId = (value) => mongoose.Types.ObjectId.isValid(String(value ?? ""));
@@ -996,13 +1015,6 @@ const completeConversationHistory = async ({ userId, message, reply, threadId, r
 		thread.title = buildThreadTitle(normalizedReply);
 	}
 
-	// if (generateTitle) {
-	// 	const generatedTitle = await generateChatTitle(normalizedMessage || normalizedReply, model);
-	// 	if (generatedTitle) {
-	// 		thread.title = generatedTitle;
-	// 	}
-	// }
-
 	await thread.save();
 	return thread;
 };
@@ -1196,7 +1208,6 @@ const isWeatherQuery = (message) => {
 
 const isWeatherContinuation = (message) => /^(today|tomorrow|same place|same location|there|here|that place|same)$/i.test(normalizeText(message));
 
-// const WEATHER_LOCATION_PROMPT_SIGNAL = /tell me a city or location/i;
 const WEATHER_LOCATION_PROMPT_SIGNAL = /(tell me a city or location|which city or location|city or location would you like)/i;
 const WEATHER_LOCATION_STOPWORDS = new Set([
 	"you", "can", "say", "me", "please", "tell", "give", "know", "want", "need",
@@ -1845,13 +1856,29 @@ const LIVE_SMALL_TALK_START = /^(hi+|hello|hey+|good\s+(?:morning|afternoon|even
 const LIVE_QUESTION_START = /^(who|whom|whose|what|which|when|where|why|how|is|are|was|were|does|do|did|can|could|will|would|has|have|tell|show|give|find|list|name|any|latest|current|today|check|news)\b/i;
 const LIVE_REQUEST_PHRASE = /\b(tell me|show me|give me|let me know|i want to know|i wanna know|do you know|can you (?:tell|find|check|show))\b/i;
 
-// Lightweight typo normalization for high-value live-search entities/roles.
+// Typo normalization for high-value live-search entities and roles.
 // Keep the user's original message for display; use this only for routing/search.
+//
+// The old version only knew "chief menester"/"chief minester", so "chef menester"
+// (a very common slip) was never recognised as an office-holder question: it was
+// not routed to the web, and the search engine received nonsense words.
 const normalizeLiveSearchTypos = (value) => {
 	let normalized = String(value ?? "")
-		.replace(/\bchief\s+men(?:e|i)ster\b/gi, "chief minister")
-		.replace(/\bchief\s+min(?:e|i)ster\b/gi, "chief minister")
-		.replace(/\bwest\s+bangal\b/gi, "West Bengal")
+		// every common misspelling of "minister": menester, menister, ministar, ministor, minsiter ...
+		.replace(/\bm[ei]n[ei]st[aeio]r\b/gi, "minister")
+		.replace(/\bminsiter\b/gi, "minister")
+		// "minster" is also a real English word, so only repair it after an office prefix
+		.replace(/\b(chief|chef|chif|cheif|prime|prim|home|finance|education|state|union|deputy|health|railway|law)\s+minster\b/gi, "$1 minister")
+		// misspellings of "chief" / "prime" in front of "minister"
+		.replace(/\b(?:chef|chif|cheif|chiief|cheef|chiff|chife)\s+minister\b/gi, "chief minister")
+		.replace(/\bchiefminister\b/gi, "chief minister")
+		.replace(/\bprim\s+minister\b/gi, "prime minister")
+		.replace(/\bprimeminister\b/gi, "prime minister")
+		// other office titles
+		.replace(/\bgovernar\b|\bgavernor\b|\bgovenor\b|\bgovernoor\b/gi, "governor")
+		.replace(/\bpresidant\b|\bpresidnt\b|\bpresiden\b/gi, "president")
+		// places
+		.replace(/\bwest\s+(?:bangal|bengol|bangol|bengul|bangla)\b/gi, "West Bengal")
 		.replace(/\bwest\s+bengal\b/gi, "West Bengal");
 
 	// Interpret "CM" as Chief Minister only in a state-government context.
@@ -1875,7 +1902,7 @@ const LIVE_RECENCY_PATTERNS = [
 	/\b\d{1,2}[/-]\d{1,2}[/-](?:18|19|20)\d{2}\b/,
 ];
 const LIVE_NEWS_PATTERN = /\b(news|headlines?|top stories|breaking)\b/i;
-const LIVE_DYNAMIC_FACT_PATTERN = /\b(population|demograph(?:ic|ics)|GDP|inflation|unemployment|statistics|statistic|survey results|census|life expectancy|exchange rate|price|cost of living|minimum wage|tax rate|interest rate|policy|law|regulation|president|prime minister|chief minister|governor|mayor|CEO|chairman|head coach|captain|version|release|availability|opening hours|admission dates?|application deadline|exam date|result date|election result|weather|forecast|schedule|timetable)\b/i;
+const LIVE_DYNAMIC_FACT_PATTERN = /\b(population|demograph(?:ic|ics)|GDP|inflation|unemployment|statistics|statistic|survey results|census|life expectancy|exchange rate|price|cost of living|minimum wage|tax rate|interest rate|policy|law|regulation|president|prime minister|chief minister|minister|governor|mayor|mla|CEO|chairman|chancellor|commissioner|head coach|captain|champion|winner|version|release|availability|opening hours|admission dates?|application deadline|exam date|result date|election result|weather|forecast|schedule|timetable)\b/i;
 const LIVE_RANKING_PATTERN = /\b(richest|wealthiest|net\s?worth|billionaires?|highest[- ]paid|most valuable (?:company|brand|player)|market\s?cap(?:italization)?|leaderboard|largest economy|most followed|most subscribed|(?:world|global|fifa|icc|atp|wta|qs|nirf|university|college)\s+rankings?)\b/i;
 const LIVE_ROLE_HOLDER_PATTERN = /\bwho\s+(?:is|'s)\s+(?:the\s+)?(?:current\s+|present\s+|new\s+)?(?:ceo|cto|cfo|coo|chairman|head coach|coach|captain|skipper)\b/i;
 const LIVE_SPORTS_PATTERN = /\b(?:(?:cricket|football|ipl|nba|nfl|epl|tennis|match|game)\s+(?:live\s+)?scores?|scorecard|fixtures?|standings|points table|who (?:won|is winning|will win)|match (?:today|result|tonight)|box office|release date)\b/i;
@@ -1916,6 +1943,46 @@ const needsQueryRewrite = (message, conversation) => {
 	return LIVE_ANAPHORA.test(value) || LIVE_CONTINUATION_START.test(value) || value.split(/\s+/).length <= 4;
 };
 
+// A conversational question ("who is the current chief minister in West Bengal?") is not always the
+// best search query. When the first attempt finds nothing usable, retry once with just the keywords
+// plus the year, instead of giving up and answering from stale memory.
+const RETRY_QUERY_STOPWORDS = new Set([
+	"who", "whom", "whose", "what", "which", "when", "where", "why", "how", "is", "are", "was", "were",
+	"the", "a", "an", "tell", "me", "about", "please", "can", "you", "do", "does", "did", "say", "give",
+	"show", "of", "in", "at", "for", "to", "now", "currently", "exactly", "know", "want",
+]);
+
+const buildRetrySearchQuery = (query) => {
+	const keywords = normalizeText(query)
+		.replace(/[?!.,;:()"]+/g, " ")
+		.split(/\s+/)
+		.filter(Boolean)
+		.filter((word) => !RETRY_QUERY_STOPWORDS.has(word.toLowerCase()));
+
+	if (!keywords.length) {
+		return "";
+	}
+
+	const hasYear = keywords.some((word) => /^(?:18|19|20)\d{2}$/.test(word));
+	return `${keywords.slice(0, 10).join(" ")}${hasYear ? "" : ` ${new Date().getFullYear()}`}`;
+};
+
+const attemptWebSearch = async (query) => {
+	try {
+		const bundle = await searchWebDetailed(query);
+		const hasSources = Boolean((bundle?.rankedSources && bundle.rankedSources.length) || (bundle?.sources && bundle.sources.length));
+
+		if (!bundle || !hasSources || bundle.status !== "ok") {
+			logger.warn("[chatController] web search returned no usable sources", { query: String(query).slice(0, 120), status: bundle?.status || "none" });
+			return null;
+		}
+
+		return bundle;
+	} catch {
+		return null;
+	}
+};
+
 const resolveWebContext = async ({ message, useWeb, conversation = [] }) => {
 	if (!useWeb) {
 		return null;
@@ -1950,14 +2017,22 @@ const resolveWebContext = async ({ message, useWeb, conversation = [] }) => {
 
 	logger.info("[chatController] web search", { message: normalizedMessage.slice(0, 120), query: stateLevelPmMessage.slice(0, 120) });
 
-	try {
-		const bundle = await searchWebDetailed(stateLevelPmMessage);
-		const hasSources = Boolean((bundle?.rankedSources && bundle.rankedSources.length) || (bundle?.sources && bundle?.sources.length));
-		if (!bundle || !hasSources || bundle.status !== "ok") {
-			logger.warn("[chatController] web search returned no usable sources", { query: stateLevelPmMessage.slice(0, 120), status: bundle?.status || "none" });
-			return "WEB_SEARCH_FAILED";
-		}
+	let bundle = await attemptWebSearch(stateLevelPmMessage);
 
+	if (!bundle) {
+		const retryQuery = buildRetrySearchQuery(stateLevelPmMessage);
+
+		if (retryQuery && retryQuery.toLowerCase() !== stateLevelPmMessage.toLowerCase()) {
+			logger.info("[chatController] web search retry", { query: retryQuery.slice(0, 120) });
+			bundle = await attemptWebSearch(retryQuery);
+		}
+	}
+
+	if (!bundle) {
+		return "WEB_SEARCH_FAILED";
+	}
+
+	try {
 		return formatWebSearchContext(bundle);
 	} catch {
 		return "WEB_SEARCH_FAILED";
@@ -2168,7 +2243,6 @@ async function handleChat(req, res) {
 	};
 
 	const memoryFeatureEnabled = systemSettings?.features?.memory !== false;
-	//const shouldGenerateTitle = Boolean(conversationThread?.isNewThread) && !regenerate;
 	if (isAuthenticated && memoryFeatureEnabled) {
 		if (isLocationCorrectionMessage(normalizedMessage)) {
 			await deleteLocationMemories(userId).catch((error) => {
@@ -2206,7 +2280,10 @@ async function handleChat(req, res) {
 				if (last?.role === "user" && normalizeText(last.content) === normalizedMessage) {
 					history.pop();
 				}
-				return history;
+				return capConversationEntries(history.map((entry) => ({
+					...entry,
+					content: stripSourcesMarker(entry.content),
+				})));
 			})
 			.catch(() => normalizedConversation);
 	}
@@ -2346,7 +2423,10 @@ async function handleChat(req, res) {
 		}
 	}
 
-	const plan = await responsePlanner(normalizedMessage, activeConversation);
+	// Normalize common typos BEFORE planning and every live-search routing check, so that
+	// "chef menester" is planned, routed and searched as "chief minister".
+	const routingMessage = normalizeLiveSearchTypos(normalizedMessage);
+	const plan = await responsePlanner(routingMessage, activeConversation);
 	const awaitingWeatherLocation = isFollowingWeatherLocationPrompt(activeConversation);
 	if (awaitingWeatherLocation) {
 		plan.intent = "realtime";
@@ -2354,9 +2434,6 @@ async function handleChat(req, res) {
 		plan.useWeb = false;
 		plan.useRAG = false;
 	}
-	// Normalize common typos before any live-search routing checks.
-	// IMPORTANT: initialize routingMessage before every predicate that reads it (prevents TDZ ReferenceError).
-	const routingMessage = normalizeLiveSearchTypos(normalizedMessage);
 	// Force web-grounding for time-sensitive current office-holder questions.
 	const hasCurrentSignal = /\b(current|present|latest|as of|right now|now|20\d{2})\b/i.test(routingMessage);
 	const hasFinanceSignal = /\b(gold|silver|crude\s+oil|oil\s+price|share\s+price|stock\s+price|stock\s+market|market\s+price|crypto|bitcoin|ethereum|nifty|sensex|exchange\s+rate|forex|currency\s+rate|usd\s+to\s+inr|inr\s+to\s+usd|gold\s+price|gold\s+rate|commodity\s+price)\b/i.test(routingMessage);
@@ -2371,8 +2448,8 @@ async function handleChat(req, res) {
 	// "current". Explicit years/dates are also searched, while preserving that scope.
 	const isPublicOfficeQuestion = (hasPublicOfficeEntitySignal || hasPublicPmAliasSignal) && (hasOfficeQuestionSignal || hasCurrentSignal);
 	const isPublicOfficeJoiningDateQuestion =
-		/\b(cm|chief\s+minister|prime\s+minister|president|governor|minister)\b/i.test(normalizedMessage)
-		&& /\b(joining\s+date|took\s+oath|oath\s+date|sworn\s+in|assumed\s+office|term\s+started|took\s+office)\b/i.test(normalizedMessage);
+		/\b(cm|chief\s+minister|prime\s+minister|president|governor|minister)\b/i.test(routingMessage)
+		&& /\b(joining\s+date|took\s+oath|oath\s+date|sworn\s+in|assumed\s+office|term\s+started|took\s+office)\b/i.test(routingMessage);
 	const isElectionResultQuestion = hasElectionResultSignal;
 	const isFinanceQuestion = hasFinanceSignal;
 	if (isPublicOfficeQuestion) {
@@ -2461,26 +2538,27 @@ async function handleChat(req, res) {
 	const proofreadingRequested =
 		/\b(?:spell(?:ing)?[ -]?(?:check|mistakes?|errors?)|typos?|proofread(?:ing)?|grammar(?:[ -]?(?:check|mistakes?|errors?))?|punctuation(?:[ -]?(?:check|mistakes?|errors?))?|correct (?:the )?(?:spelling|grammar|english|punctuation)|check (?:my |this |the |these )?(?:spelling|grammar|writing|text|document|file)|review (?:my |this |the |these )?(?:writing|text|document|file)|find (?:and )?fix (?:the )?(?:mistakes?|errors?)|language errors?)\b/i.test(normalizedMessage);
 
+	// When the typo repair changed the request, tell the model what was meant so it answers the
+	// intended question instead of remarking on the misspelling.
+	const interpretedNote = routingMessage !== normalizedMessage && !proofreadingRequested
+		? `\n- The user's message contains typos. Interpret it as: "${routingMessage}". Answer that question directly and do not comment on the misspelling.`
+		: "";
+
 	let prompt = await buildPrompt(normalizedMessage, promptOptions);
 	prompt += `
 
 TEMPORAL ACCURACY AND WEB GROUNDING:
-- Current date/time reference for this request: ${buildTimeAndDateReport({ timeZone: clientTimeZone, userTime })}. Use it to interpret relative dates in the user's timezone. Do not present stale knowledge, old office holders, old prices, or previous-year information as current.
-- For factual questions about changing facts, public office holders, events, prices, rankings, releases, laws/policies, or news, prioritize retrieved web evidence over model memory.
-- If the user explicitly names a year, date, or time period, answer for that exact requested period. Do not replace a historical question with today's answer or silently treat a past year as current.
-- If web retrieval fails or provides no reliable evidence, say that current/period-specific information could not be verified; do not invent a result or imply a search succeeded.
-- Distinguish publication date from the date an event or fact applies to, and state the relevant date when it matters.
+- Current date/time reference: ${buildTimeAndDateReport({ timeZone: clientTimeZone, userTime })}. Use it to interpret relative dates in the user's timezone; never present stale knowledge, old office holders, old prices or previous-year information as current.
+- For facts that change over time (office holders, events, prices, rankings, releases, laws, news), prioritize retrieved web evidence over model memory. Earlier assistant replies in the history are not evidence: if one said something could not be verified, re-check it against the Web Context now.
+- If the user names a year, date or period, answer for that exact period and keep event dates separate from article publication dates.
+- If web retrieval failed or has no reliable evidence, say the current or period-specific fact could not be verified; never invent a result or imply a search succeeded.
 LATEST-TURN PRIORITY:
-- Answer the latest user request in this request, not a previous turn.
-- Treat the current user message and any successfully extracted attachment contents as the primary task.
-- Use earlier conversation only when it helps interpret the latest request; never repeat a prior answer merely because it appears in history.
-- If an attachment was provided, explicitly use its extracted contents. If extraction failed or produced no text, state that instead of guessing.
-- If image attachments are available, inspect the original image itself for visual questions (objects, people, scene, colors, and counts). OCR text is not a substitute for visual understanding. Count only visible people/objects and answer directly.
-- Be tolerant of obvious spelling mistakes, typos, and phonetic misspellings in the user's question. Infer the intended word or entity from context when unambiguous (for example, "Rassia" means "Russia"); answer the intended question instead of treating the typo as an unknown entity.
-- If a typo makes the request genuinely ambiguous, ask one brief clarification question rather than claiming that no reliable information exists.
-- Do not silently change names, numbers, locations, or technical identifiers when the intended correction is uncertain.
-- When the user explicitly asks to detect/check spelling or grammar, perform an actual proofreading pass and list the original text, correction, and reason. Do not merely answer the underlying topic.
-- For attachments, distinguish between file receipt, successful content extraction, and actual semantic analysis. Never imply that OCR alone can count objects or understand a scene in an image.
+- Answer the latest user request, not a previous turn. Use earlier conversation only to interpret it; never repeat a prior answer merely because it is in history.
+- Treat the current message and any successfully extracted attachment contents as the primary task. If extraction failed or produced no text, state that instead of guessing.
+- For image attachments, inspect the original image for visual questions (objects, people, scene, colors, counts); OCR text alone cannot answer them. Count only what is visible.
+- Be tolerant of obvious spelling mistakes and phonetic misspellings; infer the intended word or entity when unambiguous. If genuinely ambiguous, ask one brief clarification question. Do not silently change names, numbers, locations or identifiers when the correction is uncertain.${interpretedNote}
+- When the user explicitly asks to detect/check spelling or grammar, do a real proofreading pass listing the original text, correction and reason.
+- For attachments, distinguish file receipt, successful content extraction and actual semantic analysis; never imply OCR alone understands a scene.
 `;
 	if (proofreadingRequested) {
 		prompt += `
@@ -2492,7 +2570,7 @@ PROOFREADING TASK (only because the user explicitly requested it):
 - Separate definite errors from optional style improvements.
 - If no errors are found in the available text, say so clearly.
 - Do not claim to have checked unreadable or unsupported file contents. If extraction is partial, state that limitation.
-- Preserve the user's intended meaning and do not silently rewrite unrelated content.
+- Do not silently rewrite unrelated content.
 `;
 	}
 	let reply = "";
@@ -2623,4 +2701,3 @@ module.exports = {
 	buildPromptOptions,
 	persistAfterReply,
 };
-
