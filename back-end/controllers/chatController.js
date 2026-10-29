@@ -19,6 +19,7 @@ const {
 const { responsePlanner } = require("../brain/responsePlanner.js");
 const { executeTool } = require("../brain/tools.js");
 const { searchWebDetailed, formatWebSearchContext } = require("../services/webSearch.js");
+const { repairQueryText, planSearchQueries, llmPlanQueries, buildMultiWebContext } = require("../services/queryUnderstanding.js");
 const imageService = require("../services/imageService.js");
 const { getSystemSettings } = require("../models/SystemSettingsModel.js");
 
@@ -1888,7 +1889,9 @@ const normalizeLiveSearchTypos = (value) => {
 		normalized = normalized.replace(/\bcm\b/gi, "chief minister");
 	}
 
-	return normalized;
+	// Last step: edit-distance repair of roles, time words and place names ("currant" -> "current",
+	// "westbengal" -> "West Bengal"), which the fixed rules above cannot anticipate.
+	return repairQueryText(normalized);
 };
 
 const LIVE_RECENCY_PATTERNS = [
@@ -1983,6 +1986,40 @@ const attemptWebSearch = async (query) => {
 	}
 };
 
+// One subject, several chances: the query as written, then a keyword-only version, then a
+// spelling-corrected / rephrased query from the model. Each attempt only runs if the one before
+// found nothing usable, so a healthy search costs nothing extra.
+const searchWithFallback = async (query) => {
+	let bundle = await attemptWebSearch(query);
+
+	if (bundle) {
+		return bundle;
+	}
+
+	const tried = new Set([String(query).toLowerCase()]);
+	const retryQuery = buildRetrySearchQuery(query);
+
+	if (retryQuery && !tried.has(retryQuery.toLowerCase())) {
+		tried.add(retryQuery.toLowerCase());
+		logger.info("[chatController] web search retry", { query: retryQuery.slice(0, 120) });
+		bundle = await attemptWebSearch(retryQuery);
+
+		if (bundle) {
+			return bundle;
+		}
+	}
+
+	const planned = await llmPlanQueries(query);
+	const candidate = normalizeText(planned?.queries?.[0] || planned?.corrected);
+
+	if (candidate && !tried.has(candidate.toLowerCase())) {
+		logger.info("[chatController] web search model-corrected retry", { query: candidate.slice(0, 120) });
+		bundle = await attemptWebSearch(candidate);
+	}
+
+	return bundle;
+};
+
 const resolveWebContext = async ({ message, useWeb, conversation = [] }) => {
 	if (!useWeb) {
 		return null;
@@ -2015,18 +2052,30 @@ const resolveWebContext = async ({ message, useWeb, conversation = [] }) => {
 		? searchBase.replace(/\bpm\b/gi, "chief minister")
 		: searchBase;
 
-	logger.info("[chatController] web search", { message: normalizedMessage.slice(0, 120), query: stateLevelPmMessage.slice(0, 120) });
+	// Decide what to search for. A question about several subjects ("... in West Bengal and Delhi")
+	// is split into one search per subject; otherwise one search is run. Spelling is repaired first.
+	const searchPlan = await planSearchQueries(stateLevelPmMessage);
 
-	let bundle = await attemptWebSearch(stateLevelPmMessage);
+	logger.info("[chatController] web search", {
+		message: normalizedMessage.slice(0, 120),
+		via: searchPlan.via,
+		queries: searchPlan.queries.map((query) => query.slice(0, 120)),
+	});
 
-	if (!bundle) {
-		const retryQuery = buildRetrySearchQuery(stateLevelPmMessage);
+	if (searchPlan.queries.length > 1) {
+		const parts = await Promise.all(searchPlan.queries.map(async (query, index) => ({
+			label: searchPlan.labels[index] || query,
+			bundle: await searchWithFallback(query),
+		})));
 
-		if (retryQuery && retryQuery.toLowerCase() !== stateLevelPmMessage.toLowerCase()) {
-			logger.info("[chatController] web search retry", { query: retryQuery.slice(0, 120) });
-			bundle = await attemptWebSearch(retryQuery);
+		try {
+			return buildMultiWebContext(parts);
+		} catch {
+			return "WEB_SEARCH_FAILED";
 		}
 	}
+
+	const bundle = await searchWithFallback(searchPlan.queries[0] || stateLevelPmMessage);
 
 	if (!bundle) {
 		return "WEB_SEARCH_FAILED";
