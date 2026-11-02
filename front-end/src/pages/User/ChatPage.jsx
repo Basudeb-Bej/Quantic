@@ -15,8 +15,10 @@ import SettingsPage from "./Settings";
 import {
     createLightningOrb,
     createMicLevelMeter,
+    collapseCumulativeSegments,
     getInitialVoiceLanguage,
     getVoiceLanguageOptions,
+    isMobileSpeechDevice,
     joinVoiceTranscript,
     rememberVoiceLanguage,
     speakWithAI,
@@ -1827,6 +1829,9 @@ function ChatPage() {
     const [editingMessageDraft, setEditingMessageDraft] = useState("");
     const [isSending, setIsSending] = useState(false);
     const [isListening, setIsListening] = useState(false);
+    const [voiceAutoRestarting, setVoiceAutoRestartingState] = useState(false);
+    // Phones end every recognition round on their own. While the next round is starting, keep showing "Listening".
+    const showListening = isListening || voiceAutoRestarting;
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [voiceModeEnabled, setVoiceModeEnabled] = useState(false);
     const [voiceConversationOpen, setVoiceConversationOpen] = useState(false);
@@ -1948,6 +1953,12 @@ function ChatPage() {
     const voiceModeEnabledRef = useRef(false);
     const voiceConversationOpenRef = useRef(false);
     const speechReadAloudRef = useRef({ status: "idle", requestId: 0, utterance: null });
+    const voiceAutoRestartingRef = useRef(false);
+    const voiceRestartGuardRef = useRef(null);
+    const setVoiceAutoRestarting = (value) => {
+        voiceAutoRestartingRef.current = value;
+        setVoiceAutoRestartingState(value);
+    };
     const reduceMotion = Boolean(auth?.settings?.reduceMotion);
     const isLoggedIn = Boolean(auth);
     const showEmptyStatePrompt = messages.length === 0;
@@ -2449,6 +2460,12 @@ function ChatPage() {
             // ignore
         }
 
+        if (voiceRestartGuardRef.current) {
+            window.clearTimeout(voiceRestartGuardRef.current);
+            voiceRestartGuardRef.current = null;
+        }
+        setVoiceAutoRestarting(false);
+
         setIsListening(false);
         if (!keepVoiceMode) {
             setVoiceModeEnabled(false);
@@ -2471,9 +2488,7 @@ function ChatPage() {
         } catch (error) {
             // Android Chrome can briefly report the recogniser as still active after onend.
             // Retry only for mobile voice sessions; leave desktop timing and behavior unchanged.
-            const isMobileChrome = isMobileViewport() && /Android/i.test(navigator?.userAgent || "") &&
-                /Chrome/i.test(navigator?.userAgent || "");
-            if (isMobileChrome && !isSpeakingRef.current && !isSendingRef.current) {
+            if (isMobileSpeechDevice() && !isSpeakingRef.current && !isSendingRef.current) {
                 if (voiceRestartTimerRef.current) {
                     window.clearTimeout(voiceRestartTimerRef.current);
                 }
@@ -2489,7 +2504,7 @@ function ChatPage() {
         }
     };
 
-    const restartVoiceListening = () => {
+    const restartVoiceListening = (delayMs = 250) => {
         if (typeof window === "undefined" || !voiceModeEnabledRef.current) {
             return;
         }
@@ -2497,14 +2512,31 @@ function ChatPage() {
         if (voiceRestartTimerRef.current) {
             window.clearTimeout(voiceRestartTimerRef.current);
         }
+        if (voiceRestartGuardRef.current) {
+            window.clearTimeout(voiceRestartGuardRef.current);
+            voiceRestartGuardRef.current = null;
+        }
+
+        // Phones end every recognition round on their own. Keep the UI on "Listening" while the next round starts.
+        if (isMobileSpeechDevice()) {
+            setVoiceAutoRestarting(true);
+            // Safety net: never leave the UI on "Listening" if the next round does not start.
+            voiceRestartGuardRef.current = window.setTimeout(() => {
+                voiceRestartGuardRef.current = null;
+                if (!isListeningRef.current) {
+                    setVoiceAutoRestarting(false);
+                }
+            }, delayMs + 3000);
+        }
 
         voiceRestartTimerRef.current = window.setTimeout(() => {
             if (!voiceModeEnabledRef.current || isSpeakingRef.current) {
+                setVoiceAutoRestarting(false);
                 return;
             }
 
             startVoiceListening();
-        }, 250);
+        }, delayMs);
     };
 
     const handleToggleVoiceMode = () => {
@@ -2572,7 +2604,7 @@ function ChatPage() {
             return;
         }
 
-        if (isListeningRef.current) {
+        if (isListeningRef.current || voiceAutoRestartingRef.current) {
             stopVoiceListening({ keepVoiceMode: true });
             return;
         }
@@ -2592,11 +2624,14 @@ function ChatPage() {
 
         if (shouldResumeListening) {
             stopVoiceListening({ keepVoiceMode: true });
-        } else {
-            setManualPlaybackActive(true);
         }
 
         stopVoicePlayback();
+
+        if (isManualPlayback) {
+            // Must come after stopVoicePlayback(), which resets it. A second tap now stops instead of restarting.
+            setManualPlaybackActive(true);
+        }
         const playbackRequestId = ++voicePlaybackRequestRef.current;
 
         try {
@@ -2610,7 +2645,7 @@ function ChatPage() {
                         setManualPlaybackActive(false);
                     }
                     if (shouldResumeListening && voiceModeEnabledRef.current) {
-                        restartVoiceListening();
+                        restartVoiceListening(isMobileSpeechDevice() ? 600 : 250);
                     }
                 },
                 { onBoundary: handleSpeechBoundaryPulse }
@@ -2627,7 +2662,7 @@ function ChatPage() {
                         // ignore
                     }
                 }
-                return null;
+                return "cancelled";
             }
 
             if (audio) {
@@ -2655,12 +2690,8 @@ function ChatPage() {
         }
 
         const hasNativeAudio = typeof window !== "undefined" && typeof Audio !== "undefined";
-        // On mobile, use the page-level SpeechSynthesis path directly for message read-aloud.
-        // The service path reports success before speech actually starts, which can swallow
-        // the fallback when mobile browsers silently reject/drop the queued utterance.
-        const useMobileSpeechPath = isMobileViewport();
 
-        if (hasNativeAudio && !useMobileSpeechPath) {
+        if (hasNativeAudio) {
             const playedAudio = await playAssistantVoice(content, options);
 
             if (playedAudio) {
@@ -3368,12 +3399,13 @@ function ChatPage() {
         }
 
         const recognition = new SpeechRecognition();
-        recognition.continuous = true;
+        recognition.continuous = !isMobileSpeechDevice();
         recognition.interimResults = true;
         recognition.maxAlternatives = 1;
         recognition.lang = voiceLangRef.current || navigator?.language || "en-US";
 
         recognition.onstart = () => {
+            setVoiceAutoRestarting(false);
             // A new session starts with an empty results list.
             voiceConsumedRef.current = 0;
             voiceSessionTextRef.current = "";
@@ -3477,7 +3509,10 @@ function ChatPage() {
                 }
             }
 
-            const sessionText = joinVoiceTranscript(segments, recognition.lang);
+            const sessionText = joinVoiceTranscript(
+                isMobileSpeechDevice() ? collapseCumulativeSegments(segments) : segments,
+                recognition.lang
+            );
             voiceSessionTextRef.current = sessionText;
 
             const fullText = joinVoiceTranscript([voiceBaseTextRef.current, sessionText], recognition.lang);
@@ -3565,9 +3600,9 @@ function ChatPage() {
     }, [voiceConversationOpen, reduceMotion]);
 
     useEffect(() => {
-        const nextMode = isSpeaking ? "speaking" : isSending ? "thinking" : isListening ? "listening" : "idle";
+        const nextMode = isSpeaking ? "speaking" : isSending ? "thinking" : showListening ? "listening" : "idle";
         orbEngineRef.current?.setMode(nextMode);
-    }, [voiceConversationOpen, reduceMotion, isSpeaking, isSending, isListening]);
+    }, [voiceConversationOpen, reduceMotion, isSpeaking, isSending, showListening]);
 
     useEffect(() => {
         const node = voiceCaptionRef.current;
@@ -4340,7 +4375,7 @@ function ChatPage() {
         ? "Speaking response..."
         : isSending
             ? "Thinking..."
-            : isListening
+            : showListening
                 ? "Listening..."
                 : "Say something...";
     const voiceLanguageOptions = getVoiceLanguageOptions(voiceLang);
@@ -4390,12 +4425,12 @@ function ChatPage() {
             ) : null}
             <button
                 type="button"
-                className={`chat-composer__voice-button ${isListening ? "is-active" : ""}`}
+                className={`chat-composer__voice-button ${showListening ? "is-active" : ""}`}
                 onClick={handleToggleVoiceMode}
-                aria-label={isListening ? "Stop listening" : "Dictate"}
-                title={isListening ? "Stop listening" : "Dictate"}
+                aria-label={showListening ? "Stop listening" : "Dictate"}
+                title={showListening ? "Stop listening" : "Dictate"}
             >
-                <span className="material-symbols-rounded">{isListening ? "mic_off" : "mic"}</span>
+                <span className="material-symbols-rounded">{showListening ? "mic_off" : "mic"}</span>
             </button>
             {composerPrimaryAction}
         </div>
@@ -5294,12 +5329,12 @@ function ChatPage() {
                             </button>
                             <button
                                 type="button"
-                                className={`ai-voice-orb__action ${isListening ? "is-listening" : ""}`}
+                                className={`ai-voice-orb__action ${showListening ? "is-listening" : ""}`}
                                 onClick={handleToggleVoiceConversationMic}
-                                aria-label={isListening ? "Stop listening" : "Start listening"}
-                                title={isListening ? "Stop listening" : "Start listening"}
+                                aria-label={showListening ? "Stop listening" : "Start listening"}
+                                title={showListening ? "Stop listening" : "Start listening"}
                             >
-                                <span className="material-symbols-rounded">{isListening ? "mic_off" : "mic"}</span>
+                                <span className="material-symbols-rounded">{showListening ? "mic_off" : "mic"}</span>
                             </button>
                         </div>
                     </div>
