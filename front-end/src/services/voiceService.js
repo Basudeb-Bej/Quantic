@@ -2,6 +2,67 @@
 const getReadableText = (content) => String(content ?? "").trim();
 let activeSpeechRequestId = 0;
 
+/* ---------- Mobile speech helpers ---------- */
+const isIOSDevice = () =>
+	typeof navigator !== "undefined" &&
+	(/iPhone|iPad|iPod/i.test(navigator.userAgent || "") || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
+
+const isMobileDevice = () =>
+	typeof navigator !== "undefined" && (/Android/i.test(navigator.userAgent || "") || isIOSDevice());
+
+export const isMobileSpeechDevice = isMobileDevice;
+
+// Android reports "en_IN", desktop reports "en-IN". Compare them the same way.
+const normalizeLangTag = (value) => String(value || "").toLowerCase().replace(/_/g, "-");
+
+// Phones often join a long sentence into repeated, growing results ("hello", "hello how", ...).
+// Keep only the longest version of each growing phrase.
+export const collapseCumulativeSegments = (segments) => {
+	const kept = [];
+	for (const segment of Array.isArray(segments) ? segments : []) {
+		const text = String(segment ?? "").trim();
+		if (!text) continue;
+		const last = kept[kept.length - 1];
+		if (last) {
+			const a = last.toLowerCase();
+			const b = text.toLowerCase();
+			if (b.startsWith(a)) {
+				kept[kept.length - 1] = text;
+				continue;
+			}
+			if (a.startsWith(b)) continue;
+		}
+		kept.push(text);
+	}
+	return kept;
+};
+
+// iOS only lets speech start after one speak() call made inside a tap. Do it silently on the first tap
+// so later replies (including the automatic voice-conversation replies) are allowed.
+let speechPrimed = false;
+const primeSpeechSynthesis = () => {
+	if (speechPrimed || typeof window === "undefined" || !("speechSynthesis" in window)) return;
+	speechPrimed = true;
+	try {
+		window.speechSynthesis.getVoices?.();
+		const unlock = new SpeechSynthesisUtterance(" ");
+		unlock.volume = 0;
+		window.speechSynthesis.speak(unlock);
+	} catch {
+		// ignore
+	}
+};
+
+if (typeof window !== "undefined" && isIOSDevice()) {
+	const unlockOnFirstGesture = () => {
+		primeSpeechSynthesis();
+		window.removeEventListener("touchend", unlockOnFirstGesture, true);
+		window.removeEventListener("click", unlockOnFirstGesture, true);
+	};
+	window.addEventListener("touchend", unlockOnFirstGesture, { capture: true, passive: true });
+	window.addEventListener("click", unlockOnFirstGesture, true);
+}
+
 export const cancelSpeechSynthesis = () => {
 	// Invalidate the current chunk chain before cancelling: browsers may fire onend/onerror
 	// for a cancelled utterance, and those handlers must not enqueue the next chunk.
@@ -68,7 +129,7 @@ const pickVoiceForLang = (preferredLang) => {
 	const voices = window.speechSynthesis.getVoices?.() || [];
 	if (!voices.length) return null;
 
-	const normalizedPreferred = String(preferredLang || "").toLowerCase();
+	const normalizedPreferred = normalizeLangTag(preferredLang);
 	const base = normalizedPreferred.split("-")[0];
 	const cacheKey = base;
 
@@ -76,8 +137,11 @@ const pickVoiceForLang = (preferredLang) => {
 		return voiceSelectionCache.get(cacheKey);
 	}
 
-	const exact = voices.filter((v) => String(v.lang || "").toLowerCase() === normalizedPreferred);
-	const sameBase = voices.filter((v) => String(v.lang || "").toLowerCase().startsWith(`${base}-`) || String(v.lang || "").toLowerCase() === base);
+	const exact = voices.filter((v) => normalizeLangTag(v.lang) === normalizedPreferred);
+	const sameBase = voices.filter((v) => {
+		const lang = normalizeLangTag(v.lang);
+		return lang.startsWith(`${base}-`) || lang === base;
+	});
 	const pool = exact.length ? exact : sameBase.length ? sameBase : voices;
 
 	let chosen = null;
@@ -92,7 +156,7 @@ const pickVoiceForLang = (preferredLang) => {
 				let score = 0;
 				if (/(natural|premium|google|microsoft|enhanced|neural)/i.test(voice.name || "")) score += 3;
 				if (voice.localService) score += 1;
-				const lang = String(voice.lang || "").toLowerCase();
+				const lang = normalizeLangTag(voice.lang);
 				if (lang === normalizedPreferred) score += 2;
 				else if (base && lang.startsWith(`${base}-`)) score += 1;
 				return { voice, score };
@@ -166,7 +230,7 @@ export const speakWithAI = async (content, onStart, onEnd, options = {}) => {
 	const preferredLang = options.lang || detectedLang || navigator?.language || "en-US";
 	const voice = await waitForVoices(preferredLang);
 	if (requestId !== activeSpeechRequestId) return null;
-	const resolvedLang = voice?.lang || preferredLang;
+	const resolvedLang = String(voice?.lang || preferredLang).replace(/_/g, "-");
 
 	const synth = window.speechSynthesis;
 	try {
@@ -187,9 +251,11 @@ export const speakWithAI = async (content, onStart, onEnd, options = {}) => {
 	}
 
 	const chunks = chunkText(readableText);
+	const mobile = isMobileDevice();
 	let index = 0;
+	let startReported = false;
 
-	const speakNext = () => {
+	const speakNext = (attempt = 0) => {
 		if (requestId !== activeSpeechRequestId) return;
 		if (index >= chunks.length) {
 			if (typeof onEnd === "function") onEnd();
@@ -202,24 +268,69 @@ export const speakWithAI = async (content, onStart, onEnd, options = {}) => {
 		utterance.pitch = 1.05;
 		utterance.volume = 1;
 
-		if (index === 0 && typeof onStart === "function") {
-			utterance.onstart = () => onStart();
-		}
-		if (typeof options.onBoundary === "function") {
-			utterance.onboundary = (event) => options.onBoundary(event);
-		}
-		utterance.onend = () => {
-			if (requestId !== activeSpeechRequestId) return;
-			index += 1;
-			speakNext();
+		let watchTimer = 0;
+		const stopWatch = () => {
+			if (watchTimer) {
+				window.clearInterval(watchTimer);
+				watchTimer = 0;
+			}
 		};
-		utterance.onerror = () => {
+		const markStarted = () => {
+			stopWatch();
+			if (!startReported) {
+				startReported = true;
+				if (typeof onStart === "function") onStart();
+			}
+		};
+		const advance = () => {
+			stopWatch();
 			if (requestId !== activeSpeechRequestId) return;
 			index += 1;
 			speakNext();
 		};
 
+		utterance.onstart = markStarted;
+		if (typeof options.onBoundary === "function") {
+			utterance.onboundary = (event) => options.onBoundary(event);
+		}
+		utterance.onend = advance;
+		utterance.onerror = advance;
+
 		window.speechSynthesis.speak(utterance);
+
+		// Phones sometimes accept an utterance and then silently drop it, or play it without ever firing
+		// onstart. Detect both so the UI can never get stuck. Desktop does not use this.
+		if (mobile) {
+			let ticks = 0;
+			watchTimer = window.setInterval(() => {
+				ticks += 1;
+				if (requestId !== activeSpeechRequestId) {
+					stopWatch();
+					return;
+				}
+				if (synth.speaking) {
+					markStarted(); // it is playing, the start event just never arrived
+					return;
+				}
+				if (ticks < 6 || (synth.pending && ticks < 14)) return;
+
+				// Nothing is playing and nothing is queued: reset the engine and retry once.
+				stopWatch();
+				utterance.onend = null;
+				utterance.onerror = null;
+				try {
+					synth.cancel();
+					synth.resume?.();
+				} catch {
+					// ignore
+				}
+				if (attempt < 1) {
+					window.setTimeout(() => speakNext(attempt + 1), 200);
+				} else if (typeof onEnd === "function") {
+					onEnd();
+				}
+			}, 500);
+		}
 	};
 
 	speakNext();
