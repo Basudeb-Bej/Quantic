@@ -609,6 +609,287 @@ function AttachmentPreview({ attachment, variant = "composer", onRemove, onImage
                     className="chat-transcript__attachment-tile chat-transcript__attachment-tile--pasted"
                     onClick={() => onPastedTextClick?.({ name: attachment.name || "Pasted Text", content: decoded })}
                     aria-label="View full pasted text"
+                    title="CliremoveItem(key);
+        return;
+    }
+
+    try {
+        localStorage.setItem(key, JSON.stringify(attachments));
+    } catch (error) {
+        // Draft attachment persistence is best-effort: large base64 files can exceed
+        // the browser's small localStorage quota. Never let this break the chat UI.
+        if (error?.name === "QuotaExceededError" || error?.name === "NS_ERROR_DOM_QUOTA_REACHED") {
+            try {
+                if (typeof window !== "undefined") {
+                    window.dispatchEvent(new CustomEvent("quantic:storage-quota-exceeded", {
+                        detail: { key, kind: "draft-attachments" },
+                    }));
+                }
+            } catch {
+                // Notification failure must not affect chat functionality.
+            }
+            return false;
+        }
+        console.error("[ChatPage] Could not persist draft attachments.", error);
+        return false;
+    }
+    return true;
+};
+
+const readStoredString = (key, fallback = "") => {
+    if (typeof window === "undefined") {
+        return fallback;
+    }
+
+    const storedValue = localStorage.getItem(key);
+    return storedValue && storedValue.trim() ? storedValue : fallback;
+};
+
+const writeStoredString = (key, value) => {
+    if (typeof window === "undefined") {
+        return;
+    }
+
+    const normalizedValue = String(value ?? "").trim();
+    if (!normalizedValue) {
+        localStorage.removeItem(key);
+        return;
+    }
+
+    localStorage.setItem(key, normalizedValue);
+};
+
+const getDraftAttachmentsStorageKey = (userId, threadId) => {
+    const normalizedUserId = String(userId ?? "guest").trim() || "guest";
+    const normalizedThreadId = String(threadId ?? "new").trim() || "new";
+    return `${chatHistoryStoragePrefix}_draft_attachments_${normalizedUserId}_${normalizedThreadId}`;
+};
+
+const TEXTAREA_MAX_HEIGHT_PX = 200;
+
+const autoResizeTextarea = (node) => {
+    if (!node) {
+        return;
+    }
+
+    node.style.height = "auto";
+    node.style.height = `${Math.min(node.scrollHeight, TEXTAREA_MAX_HEIGHT_PX)}px`;
+};
+
+const PASTE_TEXT_BLOCK_MIN_LENGTH = 400;
+const PASTE_TEXT_BLOCK_MIN_LINES = 8;
+
+const buildPastedTextPreview = (text) => {
+    const normalized = String(text || "");
+    const firstLine = normalized.split(/\r?\n/, 1)[0] || "";
+    return firstLine.slice(0, 60) || "Pasted Text";
+};
+
+const encodeTextAsDataUrl = (text) => {
+    try {
+        return `data:text/plain;base64,${btoa(unescape(encodeURIComponent(String(text || ""))))}`;
+    } catch {
+        return "";
+    }
+};
+
+const decodeTextDataUrl = (dataUrl) => {
+    const match = String(dataUrl || "").match(/^data:text\/plain;base64,(.+)$/i);
+    if (!match?.[1]) {
+        return "";
+    }
+    try {
+        return decodeURIComponent(escape(atob(match[1])));
+    } catch {
+        return "";
+    }
+};
+
+const isPastedTextAttachment = (attachment) =>
+    String(attachment?.type || "").toLowerCase() === "text/plain" &&
+    String(attachment?.dataUrl || "").startsWith("data:text/plain;base64,");
+
+const readFileAsDataUrl = (file) =>
+    new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("Unable to read attachment."));
+        reader.readAsDataURL(file);
+    });
+
+const readJsonResponse = async (response) => {
+    const contentType = response.headers.get("content-type") || "";
+
+    if (!contentType.includes("application/json")) {
+        return null;
+    }
+
+    try {
+        return await response.json();
+    } catch {
+        return null;
+    }
+};
+
+const getLegalCopySegments = (isLoggedIn) =>
+    isLoggedIn
+        ? [
+            "Quantic can make mistakes. Check important info. See ",
+            { text: "Cookie Preferences", id: "cookie-preferences" },
+            ".",
+        ]
+        : [
+            "By messaging Quantic, an AI chatbot, you agree to our ",
+            { text: "Terms", id: "terms" },
+            " and have read our ",
+            { text: "Privacy Policy", id: "privacy-policy" },
+            ". See ",
+            { text: "Cookie Preferences", id: "cookie-preferences" },
+            ".",
+        ];
+
+const legalPages = {
+    terms: {
+        title: "Terms",
+        intro: [
+            "These terms explain how you can use Quantic and what we expect from people using the app.",
+        ],
+        sections: [
+            {
+                heading: "Acceptable use",
+                points: [
+                    "Use the app for lawful purposes only.",
+                    "Do not send harmful, abusive, deceptive, or illegal content.",
+                    "Do not attempt to disrupt the service, bypass access controls, or abuse rate limits.",
+                ],
+            },
+            {
+                heading: "Account responsibility",
+                points: [
+                    "Keep your login details secure.",
+                    "You are responsible for activity performed under your account.",
+                    "Tell us if you suspect unauthorized access.",
+                ],
+            },
+            {
+                heading: "Service changes",
+                points: [
+                    "We may change, suspend, or improve features over time.",
+                    "We may update these terms when the product or legal requirements change.",
+                ],
+            },
+        ],
+    },
+    "privacy-policy": {
+        title: "Privacy Policy",
+        intro: [
+            "This summary explains what data Quantic stores and why it is used.",
+        ],
+        sections: [
+            {
+                heading: "Information we store",
+                points: [
+                    "Account details you provide during registration or profile updates.",
+                    "Session and UI preferences such as the active view and sidebar state.",
+                    "Chat settings that help keep your experience consistent across visits.",
+                ],
+            },
+            {
+                heading: "How we use it",
+                points: [
+                    "To authenticate you and keep you signed in securely.",
+                    "To restore your saved preferences and profile settings.",
+                    "To operate the chat experience and improve the product.",
+                ],
+            },
+            {
+                heading: "Your control",
+                points: [
+                    "You can clear browser storage to remove local preferences.",
+                    "You can log out to end the current authenticated session.",
+                ],
+            },
+        ],
+    },
+    "cookie-preferences": {
+        title: "Cookie Preferences",
+        intro: [
+            "Quantic uses browser storage for essential functionality and convenience preferences.",
+        ],
+        sections: [
+            {
+                heading: "Essential storage",
+                points: [
+                    "Keeps the current session state and login flow working.",
+                    "Remembers the sidebar and active view settings.",
+                ],
+            },
+            {
+                heading: "Preference storage",
+                points: [
+                    "Stores selected profile preferences such as avatar and motion settings.",
+                    "Helps the app restore your layout the next time you visit.",
+                ],
+            },
+            {
+                heading: "Manage locally",
+                points: [
+                    "Use your browser settings to clear site data if you want a fresh start.",
+                    "Logging out removes the current session state from this device.",
+                ],
+            },
+        ],
+    },
+};
+
+const starterPrompts = [
+    "Explain this codebase like I’m joining the project today.",
+    "Draft a short project update for my team.",
+    "Give me three ways to improve this chat UI.",
+    "Summarize the benefits of a custom RAG pipeline.",
+];
+
+function CloseIcon() {
+    return (
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M6 6l12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            <path d="M18 6 6 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+    );
+}
+
+function CheckIcon() {
+    return (
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+    );
+}
+
+function SendingIcon() {
+    return (
+        <svg className="chat-composer__sending-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="2" strokeOpacity="0.28" />
+            <path d="M12 4a8 8 0 0 1 8 8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+    );
+}
+
+function AttachmentPreview({ attachment, variant = "composer", onRemove, onImageClick, onPastedTextClick }) {
+    const isImage = String(attachment?.type || "").toLowerCase().startsWith("image/") && String(attachment?.dataUrl || "").startsWith("data:");
+    const name = String(attachment?.name || "Attachment").trim() || "Attachment";
+
+    if (variant === "message") {
+        if (isPastedTextAttachment(attachment)) {
+            const decoded = decodeTextDataUrl(attachment.dataUrl);
+            const previewLines = decoded.split(/\r?\n/).slice(0, 4);
+
+            return (
+                <button
+                    type="button"
+                    className="chat-transcript__attachment-tile chat-transcript__attachment-tile--pasted"
+                    onClick={() => onPastedTextClick?.({ name: attachment.name || "Pasted Text", content: decoded })}
+                    aria-label="View full pasted text"
                     title="Click to view full pasted text"
                 >
                     <div className="chat-transcript__attachment-tile-preview chat-transcript__attachment-tile-preview--text">
