@@ -512,6 +512,275 @@ const SHRINK_STEPS = [
   { heading: "RAG Context", mode: "docs", min: 600, note: "retrieved documents trimmed" },
   { heading: "User Memory", mode: "head", min: 400, note: "memory trimmed" },
   { heading: "User Profile", mode: "head", min: 300, note: "profile trimmed" },
+  { heading: "Attachge", retryable: false, retryAfterMs: 0, deadModel: false });
+  }
+
+  if (status === 429 || groqCode === "rate_limit_exceeded") {
+    return build({ reason: "rate-limit", retryable: false, retryAfterMs, deadModel: false });
+  }
+
+  if (status >= 500) {
+    return build({ reason: "groq-server", retryable: true, retryAfterMs: 0, deadModel: false });
+  }
+
+  if (status === 400) {
+    return build({ reason: "bad-request", retryable: false, retryAfterMs: 0, deadModel: false });
+  }
+
+  return build({ reason: "unknown", retryable: true, retryAfterMs: 0, deadModel: false });
+};
+
+const logGroqFailure = (label, error) => {
+  const failure = describeGroqFailure(error);
+  logEvent(`${label} [groq:${failure.reason}]`, {
+    reason: failure.reason,
+    retryAfterMs: failure.retryAfterMs,
+    ...serializeError(error),
+  });
+  return failure;
+};
+
+// Remember a model's real tokens-per-minute ceiling the first time Groq states it.
+const learnTpmFromError = (model, error, failure) => {
+  const message = String(error?.response?.data?.error?.message || "");
+
+  if (!failure?.limit || !/tokens per minute|\bTPM\b/i.test(message)) {
+    return;
+  }
+
+  const key = String(model || "").trim().toLowerCase();
+
+  if (key && learnedTpmLimits.get(key) !== failure.limit) {
+    learnedTpmLimits.set(key, failure.limit);
+    logEvent("tpm-limit-learned", { model: key, limit: failure.limit });
+  }
+};
+
+// The old single fallback string told the user nothing and told us nothing.
+// Each reason now maps to a message that is true and actionable.
+const buildFallbackReply = (failure = null) => {
+  const reason = failure?.reason || "unknown";
+
+  if (reason === "rate-limit") {
+    const seconds = failure?.retryAfterMs ? Math.ceil(failure.retryAfterMs / 1000) : 0;
+    return seconds
+      ? `I have hit my request limit for the moment. Please try again in about ${seconds} second${seconds === 1 ? "" : "s"}.`
+      : "I have hit my request limit for the moment. Please try again in a few seconds.";
+  }
+
+  if (reason === "request-too-large") {
+    return "That request is still too large for the AI service's current limits, even after I trimmed the background context. Try a shorter message, or start a new chat and send it again.";
+  }
+
+  if (reason === "auth") {
+    return "I cannot authenticate with the AI service right now. This usually means the API key needs attention.";
+  }
+
+  if (reason === "model-unavailable") {
+    return "The model I was configured to use is not available right now. Please try again in a moment.";
+  }
+
+  if (reason === "timeout" || reason === "network" || reason === "groq-server") {
+    return "I could not reach the AI service just now. Please try again in a moment.";
+  }
+
+  return "I ran into a problem generating that answer. Please try again in a moment.";
+};
+
+/* ------------------------------------------------------------------ *
+ * 3. Text helpers
+ * ------------------------------------------------------------------ */
+
+const normalizeText = (value) => String(value ?? "").trim();
+
+const estimateTokenCount = (text) => Math.ceil(String(text ?? "").length / CHARS_PER_TOKEN_ESTIMATE);
+
+const getModelLimits = (model) => {
+  const normalizedModel = String(model || "").toLowerCase();
+
+  if (MODEL_LIMITS[normalizedModel]) {
+    return MODEL_LIMITS[normalizedModel];
+  }
+
+  return { context: DEFAULT_CONTEXT_TOKENS, maxCompletion: DEFAULT_MAX_COMPLETION_TOKENS };
+};
+
+// Clamping the completion request is the safe way to respect a model's output
+// ceiling. The old code shrank the *prompt* instead, which silently threw away
+// the user's own content to make room for tokens the model was never going to
+// emit.
+const clampCompletionTokens = (model, requestedTokens) => {
+  const { maxCompletion } = getModelLimits(model);
+  const requested = Number(requestedTokens) || MAIN_MAX_TOKENS;
+  return Math.max(64, Math.min(requested, maxCompletion));
+};
+
+const countCodeFences = (text) => (String(text ?? "").match(/```/g) || []).length;
+
+const hasUnbalancedCodeFence = (text) => countCodeFences(text) % 2 === 1;
+
+const TERMINAL_TAIL_PATTERN = /[.!?:;)\]}"'”’`|*_~%>。．！？；：、…।॥؟؛۔】」』）］》→✓]$/;
+
+const DANGLING_TAIL_PATTERN = /(?:\b(?:and|or|but|the|to|of|with|for|from|that|which|is|are|was|were|be|been|being|has|have|had|will|would|could|should|because|into|via|such|than|if|when|while|where|whose|although|however|therefore)\s*)$|[,;:\-–—(\[{/+=<&]$/i;
+
+const endsMidSentence = (text) => {
+  const trimmed = String(text ?? "").replace(/\s+$/, "");
+  if (!trimmed) return false;
+  if (TERMINAL_TAIL_PATTERN.test(trimmed)) return false;
+  if (DANGLING_TAIL_PATTERN.test(trimmed)) return true;
+
+  const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim();
+  if (!lastLine) return false;
+
+  // Headings, list items, table rows and fences are complete lines by design.
+  if (/^(#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\||```)/.test(lastLine)) return false;
+
+  const wordCount = lastLine.split(/\s+/).filter(Boolean).length;
+  return lastLine.length > 40 && wordCount >= 6 && !/[.!?…।。]/.test(lastLine);
+};
+
+const looksIncomplete = (text) => hasUnbalancedCodeFence(text) || endsMidSentence(text);
+
+const findOverlapLength = (base, addition, maxOverlap = 400) => {
+  const baseStr = String(base ?? "");
+  const addStr = String(addition ?? "");
+  const limit = Math.min(maxOverlap, baseStr.length, addStr.length);
+
+  for (let size = limit; size >= 24; size -= 1) {
+    if (baseStr.endsWith(addStr.slice(0, size))) {
+      return size;
+    }
+  }
+
+  return 0;
+};
+
+const stitchContinuation = (base, addition) => {
+  const baseStr = String(base ?? "");
+  let addStr = String(addition ?? "").replace(/\s+$/, "");
+
+  if (!addStr) return baseStr;
+  if (!baseStr) return addStr.replace(/^\s+/, "");
+
+  const overlap = findOverlapLength(baseStr, addStr.replace(/^\s+/, ""));
+  if (overlap) {
+    addStr = addStr.replace(/^\s+/, "").slice(overlap);
+    if (!addStr) return baseStr;
+  }
+
+  const startedWithBlockBreak = /^\s*\n/.test(addStr);
+  const trimmedAddition = addStr.replace(/^[ \t]+/, "").replace(/^\n+/, "");
+
+  if (!trimmedAddition) return baseStr;
+
+  const startsNewBlock = /^(#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|```|\|)/.test(trimmedAddition);
+  const baseEndsBlock = /\n$/.test(baseStr);
+
+  if (startsNewBlock || startedWithBlockBreak) {
+    const separator = baseEndsBlock ? "" : "\n\n";
+    return `${baseStr.replace(/\s+$/, "")}${separator}${trimmedAddition}`;
+  }
+
+  const baseTail = baseStr.slice(-1);
+  const additionHead = trimmedAddition.slice(0, 1);
+  const needsSpace = /[.!?,;:)\]"'’”]/.test(baseTail) || (/\w/.test(baseTail) && /[("'“]/.test(additionHead));
+
+  if (/\s/.test(baseTail)) {
+    return `${baseStr}${trimmedAddition}`;
+  }
+
+  return `${baseStr}${needsSpace ? " " : ""}${trimmedAddition}`;
+};
+
+// Cheap similarity check used to stop a continuation loop that has started
+// repeating itself rather than making progress.
+const isMostlyRepeat = (tail, addition) => {
+  const a = String(tail ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  const b = String(addition ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+
+  if (!b) return true;
+  if (b.length < 24) return a.includes(b);
+
+  const probe = b.slice(0, Math.min(160, b.length));
+  return a.includes(probe);
+};
+
+const squeezeText = (text, maxChars, note = "content trimmed to fit the token budget") => {
+  const str = String(text ?? "");
+  if (str.length <= maxChars) return str;
+
+  const headChars = Math.floor(maxChars * 0.55);
+  const tailChars = Math.max(0, maxChars - headChars);
+
+  return [
+    str.slice(0, headChars),
+    `\n\n...[${str.length - maxChars} characters omitted — ${note}]...\n\n`,
+    str.slice(str.length - tailChars),
+  ].join("");
+};
+
+const keepHeadText = (text, maxChars, note) => {
+  const str = String(text ?? "");
+  if (str.length <= maxChars) return str;
+  return `${str.slice(0, Math.max(0, maxChars)).replace(/\s+$/, "")}\n...[${note}]...`;
+};
+
+const keepTailText = (text, maxChars, note) => {
+  const str = String(text ?? "");
+  if (str.length <= maxChars) return str;
+  return `...[${note}]...\n${str.slice(str.length - Math.max(0, maxChars)).replace(/^\s+/, "")}`;
+};
+
+/* ------------------------------------------------------------------ *
+ * 3b. Fitting a prompt into a token budget
+ *
+ * The prompt is assembled from titled sections (see ragPipeline.formatPrompt).
+ * The old code cut the middle out of the whole string, which could slice a web
+ * source in half or drop the conversation unpredictably. Now the least valuable
+ * sections give way first, and the user's question, the system identity, the
+ * citation rules and the web evidence are protected for as long as possible.
+ * ------------------------------------------------------------------ */
+
+const PROMPT_SECTION_HEADINGS = [
+  "System Identity",
+  "User Profile",
+  "User Memory",
+  "RAG Context",
+  "Citation Format — MANDATORY",
+  "Conversation History",
+  "Attachments",
+  "Attachment Analysis",
+  "Attachment Response Guidance",
+  "User",
+];
+
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const parsePromptSections = (prompt) => {
+  const text = String(prompt ?? "");
+  const pattern = new RegExp(`(^|\\n\\n)(${PROMPT_SECTION_HEADINGS.map(escapeRegExp).join("|")})\\n`, "g");
+  const marks = [];
+  let match;
+
+  while ((match = pattern.exec(text))) {
+    marks.push({
+      heading: match[2],
+      start: match.index + match[1].length,
+      bodyStart: match.index + match[0].length,
+    });
+  }
+
+  return marks.map((mark, index) => ({
+    ...mark,
+    end: index + 1 < marks.length ? Math.max(mark.bodyStart, marks[index + 1].start - 2) : text.length,
+  }));
+};
+
+const SHRINK_STEPS = [
+  { heading: "Conversation History", mode: "tail", min: 500, note: "older conversation omitted" },
+  { heading: "RAG Context", mode: "docs", min: 600, note: "retrieved documents trimmed" },
+  { heading: "User Memory", mode: "head", min: 400, note: "memory trimmed" },
+  { heading: "User Profile", mode: "head", min: 300, note: "profile trimmed" },
   { heading: "Attachment Analysis", mode: "squeeze", min: 2000, note: "the attachment is larger than shown" },
   { heading: "Conversation History", mode: "tail", min: 0, note: "older conversation omitted" },
   { heading: "RAG Context", mode: "squeeze", min: 2600, note: "context trimmed to fit the token budget" },
