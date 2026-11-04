@@ -195,7 +195,7 @@ const parseRetryAfterMs = (error) => {
   return Math.round(minutes * 60000 + base);
 };
 
-// "Limit 6000, Requested 9120"  or  "maximum context length is 131072 ... you requested 140000"
+// "Limit 6000, Requested 9120"  or  "maximum context length is 131072 tokens, you requested 140000"
 const parseTokenLimits = (message) => {
   const text = String(message || "");
   const limit = Number(text.match(/\bLimit\s+(\d+)/i)?.[1])
@@ -445,7 +445,7 @@ const squeezeText = (text, maxChars, note = "content trimmed to fit the token bu
 
   return [
     str.slice(0, headChars),
-    `\n\n...[${str.length - maxChars} characters omitted — ${note}]...\n\n`,
+    `\n\n[${str.length - maxChars} characters omitted — ${note}]\n\n`,
     str.slice(str.length - tailChars),
   ].join("");
 };
@@ -453,551 +453,13 @@ const squeezeText = (text, maxChars, note = "content trimmed to fit the token bu
 const keepHeadText = (text, maxChars, note) => {
   const str = String(text ?? "");
   if (str.length <= maxChars) return str;
-  return `${str.slice(0, Math.max(0, maxChars)).replace(/\s+$/, "")}\n...[${note}]...`;
+  return `${str.slice(0, Math.max(0, maxChars)).replace(/\s+$/, "")}\n[${note}]`;
 };
 
 const keepTailText = (text, maxChars, note) => {
   const str = String(text ?? "");
   if (str.length <= maxChars) return str;
-  return `...[${note}]...\n${str.slice(str.length - Math.max(0, maxChars)).replace(/^\s+/, "")}`;
-};
-
-/* ------------------------------------------------------------------ *
- * 3b. Fitting a prompt into a token budget
- *
- * The prompt is assembled from titled sections (see ragPipeline.formatPrompt).
- * The old code cut the middle out of the whole string, which could slice a web
- * source in half or drop the conversation unpredictably. Now the least valuable
- * sections give way first, and the user's question, the system identity, the
- * citation rules and the web evidence are protected for as long as possible.
- * ------------------------------------------------------------------ */
-
-const PROMPT_SECTION_HEADINGS = [
-  "System Identity",
-  "User Profile",
-  "User Memory",
-  "RAG Context",
-  "Citation Format — MANDATORY",
-  "Conversation History",
-  "Attachments",
-  "Attachment Analysis",
-  "Attachment Response Guidance",
-  "User",
-];
-
-const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-const parsePromptSections = (prompt) => {
-  const text = String(prompt ?? "");
-  const pattern = new RegExp(`(^|\\n\\n)(${PROMPT_SECTION_HEADINGS.map(escapeRegExp).join("|")})\\n`, "g");
-  const marks = [];
-  let match;
-
-  while ((match = pattern.exec(text))) {
-    marks.push({
-      heading: match[2],
-      start: match.index + match[1].length,
-      bodyStart: match.index + match[0].length,
-    });
-  }
-
-  return marks.map((mark, index) => ({
-    ...mark,
-    end: index + 1 < marks.length ? Math.max(mark.bodyStart, marks[index + 1].start - 2) : text.length,
-  }));
-};
-
-const SHRINK_STEPS = [
-  { heading: "Conversation History", mode: "tail", min: 500, note: "older conversation omitted" },
-  { heading: "RAG Context", mode: "docs", min: 600, note: "retrieved documents trimmed" },
-  { heading: "User Memory", mode: "head", min: 400, note: "memory trimmed" },
-  { heading: "User Profile", mode: "head", min: 300, note: "profile trimmed" },
-  { heading: "Attachge", retryable: false, retryAfterMs: 0, deadModel: false });
-  }
-
-  if (status === 429 || groqCode === "rate_limit_exceeded") {
-    return build({ reason: "rate-limit", retryable: false, retryAfterMs, deadModel: false });
-  }
-
-  if (status >= 500) {
-    return build({ reason: "groq-server", retryable: true, retryAfterMs: 0, deadModel: false });
-  }
-
-  if (status === 400) {
-    return build({ reason: "bad-request", retryable: false, retryAfterMs: 0, deadModel: false });
-  }
-
-  return build({ reason: "unknown", retryable: true, retryAfterMs: 0, deadModel: false });
-};
-
-const logGroqFailure = (label, error) => {
-  const failure = describeGroqFailure(error);
-  logEvent(`${label} [groq:${failure.reason}]`, {
-    reason: failure.reason,
-    retryAfterMs: failure.retryAfterMs,
-    ...serializeError(error),
-  });
-  return failure;
-};
-
-// Remember a model's real tokens-per-minute ceiling the first time Groq states it.
-const learnTpmFromError = (model, error, failure) => {
-  const message = String(error?.response?.data?.error?.message || "");
-
-  if (!failure?.limit || !/tokens per minute|\bTPM\b/i.test(message)) {
-    return;
-  }
-
-  const key = String(model || "").trim().toLowerCase();
-
-  if (key && learnedTpmLimits.get(key) !== failure.limit) {
-    learnedTpmLimits.set(key, failure.limit);
-    logEvent("tpm-limit-learned", { model: key, limit: failure.limit });
-  }
-};
-
-// The old single fallback string told the user nothing and told us nothing.
-// Each reason now maps to a message that is true and actionable.
-const buildFallbackReply = (failure = null) => {
-  const reason = failure?.reason || "unknown";
-
-  if (reason === "rate-limit") {
-    const seconds = failure?.retryAfterMs ? Math.ceil(failure.retryAfterMs / 1000) : 0;
-    return seconds
-      ? `I have hit my request limit for the moment. Please try again in about ${seconds} second${seconds === 1 ? "" : "s"}.`
-      : "I have hit my request limit for the moment. Please try again in a few seconds.";
-  }
-
-  if (reason === "request-too-large") {
-    return "That request is still too large for the AI service's current limits, even after I trimmed the background context. Try a shorter message, or start a new chat and send it again.";
-  }
-
-  if (reason === "auth") {
-    return "I cannot authenticate with the AI service right now. This usually means the API key needs attention.";
-  }
-
-  if (reason === "model-unavailable") {
-    return "The model I was configured to use is not available right now. Please try again in a moment.";
-  }
-
-  if (reason === "timeout" || reason === "network" || reason === "groq-server") {
-    return "I could not reach the AI service just now. Please try again in a moment.";
-  }
-
-  return "I ran into a problem generating that answer. Please try again in a moment.";
-};
-
-/* ------------------------------------------------------------------ *
- * 3. Text helpers
- * ------------------------------------------------------------------ */
-
-const normalizeText = (value) => String(value ?? "").trim();
-
-const estimateTokenCount = (text) => Math.ceil(String(text ?? "").length / CHARS_PER_TOKEN_ESTIMATE);
-
-const getModelLimits = (model) => {
-  const normalizedModel = String(model || "").toLowerCase();
-
-  if (MODEL_LIMITS[normalizedModel]) {
-    return MODEL_LIMITS[normalizedModel];
-  }
-
-  return { context: DEFAULT_CONTEXT_TOKENS, maxCompletion: DEFAULT_MAX_COMPLETION_TOKENS };
-};
-
-// Clamping the completion request is the safe way to respect a model's output
-// ceiling. The old code shrank the *prompt* instead, which silently threw away
-// the user's own content to make room for tokens the model was never going to
-// emit.
-const clampCompletionTokens = (model, requestedTokens) => {
-  const { maxCompletion } = getModelLimits(model);
-  const requested = Number(requestedTokens) || MAIN_MAX_TOKENS;
-  return Math.max(64, Math.min(requested, maxCompletion));
-};
-
-const countCodeFences = (text) => (String(text ?? "").match(/```/g) || []).length;
-
-const hasUnbalancedCodeFence = (text) => countCodeFences(text) % 2 === 1;
-
-const TERMINAL_TAIL_PATTERN = /[.!?:;)\]}"'”’`|*_~%>。．！？；：、…।॥؟؛۔】」』）］》→✓]$/;
-
-const DANGLING_TAIL_PATTERN = /(?:\b(?:and|or|but|the|to|of|with|for|from|that|which|is|are|was|were|be|been|being|has|have|had|will|would|could|should|because|into|via|such|than|if|when|while|where|whose|although|however|therefore)\s*)$|[,;:\-–—(\[{/+=<&]$/i;
-
-const endsMidSentence = (text) => {
-  const trimmed = String(text ?? "").replace(/\s+$/, "");
-  if (!trimmed) return false;
-  if (TERMINAL_TAIL_PATTERN.test(trimmed)) return false;
-  if (DANGLING_TAIL_PATTERN.test(trimmed)) return true;
-
-  const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim();
-  if (!lastLine) return false;
-
-  // Headings, list items, table rows and fences are complete lines by design.
-  if (/^(#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\||```)/.test(lastLine)) return false;
-
-  const wordCount = lastLine.split(/\s+/).filter(Boolean).length;
-  return lastLine.length > 40 && wordCount >= 6 && !/[.!?…।。]/.test(lastLine);
-};
-
-const looksIncomplete = (text) => hasUnbalancedCodeFence(text) || endsMidSentence(text);
-
-const findOverlapLength = (base, addition, maxOverlap = 400) => {
-  const baseStr = String(base ?? "");
-  const addStr = String(addition ?? "");
-  const limit = Math.min(maxOverlap, baseStr.length, addStr.length);
-
-  for (let size = limit; size >= 24; size -= 1) {
-    if (baseStr.endsWith(addStr.slice(0, size))) {
-      return size;
-    }
-  }
-
-  return 0;
-};
-
-const stitchContinuation = (base, addition) => {
-  const baseStr = String(base ?? "");
-  let addStr = String(addition ?? "").replace(/\s+$/, "");
-
-  if (!addStr) return baseStr;
-  if (!baseStr) return addStr.replace(/^\s+/, "");
-
-  const overlap = findOverlapLength(baseStr, addStr.replace(/^\s+/, ""));
-  if (overlap) {
-    addStr = addStr.replace(/^\s+/, "").slice(overlap);
-    if (!addStr) return baseStr;
-  }
-
-  const startedWithBlockBreak = /^\s*\n/.test(addStr);
-  const trimmedAddition = addStr.replace(/^[ \t]+/, "").replace(/^\n+/, "");
-
-  if (!trimmedAddition) return baseStr;
-
-  const startsNewBlock = /^(#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|```|\|)/.test(trimmedAddition);
-  const baseEndsBlock = /\n$/.test(baseStr);
-
-  if (startsNewBlock || startedWithBlockBreak) {
-    const separator = baseEndsBlock ? "" : "\n\n";
-    return `${baseStr.replace(/\s+$/, "")}${separator}${trimmedAddition}`;
-  }
-
-  const baseTail = baseStr.slice(-1);
-  const additionHead = trimmedAddition.slice(0, 1);
-  const needsSpace = /[.!?,;:)\]"'’”]/.test(baseTail) || (/\w/.test(baseTail) && /[("'“]/.test(additionHead));
-
-  if (/\s/.test(baseTail)) {
-    return `${baseStr}${trimmedAddition}`;
-  }
-
-  return `${baseStr}${needsSpace ? " " : ""}${trimmedAddition}`;
-};
-
-// Cheap similarity check used to stop a continuation loop that has started
-// repeating itself rather than making progress.
-const isMostlyRepeat = (tail, addition) => {
-  const a = String(tail ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-  const b = String(addition ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-
-  if (!b) return true;
-  if (b.length < 24) return a.includes(b);
-
-  const probe = b.slice(0, Math.min(160, b.length));
-  return a.includes(probe);
-};
-
-const squeezeText = (text, maxChars, note = "content trimmed to fit the token budget") => {
-  const str = String(text ?? "");
-  if (str.length <= maxChars) return str;
-
-  const headChars = Math.floor(maxChars * 0.55);
-  const tailChars = Math.max(0, maxChars - headChars);
-
-  return [
-    str.slice(0, headChars),
-    `\n\n...[${str.length - maxChars} characters omitted — ${note}]...\n\n`,
-    str.slice(str.length - tailChars),
-  ].join("");
-};
-
-const keepHeadText = (text, maxChars, note) => {
-  const str = String(text ?? "");
-  if (str.length <= maxChars) return str;
-  return `${str.slice(0, Math.max(0, maxChars)).replace(/\s+$/, "")}\n...[${note}]...`;
-};
-
-const keepTailText = (text, maxChars, note) => {
-  const str = String(text ?? "");
-  if (str.length <= maxChars) return str;
-  return `...[${note}]...\n${str.slice(str.length - Math.max(0, maxChars)).replace(/^\s+/, "")}`;
-};
-
-/* ------------------------------------------------------------------ *
- * 3b. Fitting a prompt into a token budget
- *
- * The prompt is assembled from titled sections (see ragPipeline.formatPrompt).
- * The old code cut the middle out of the whole string, which could slice a web
- * source in half or drop the conversation unpredictably. Now the least valuable
- * sections give way first, and the user's question, the system identity, the
- * citation rules and the web evidence are protected for as long as possible.
- * ------------------------------------------------------------------ */
-
-const PROMPT_SECTION_HEADINGS = [
-  "System Identity",
-  "User Profile",
-  "User Memory",
-  "RAG Context",
-  "Citation Format — MANDATORY",
-  "Conversation History",
-  "Attachments",
-  "Attachment Analysis",
-  "Attachment Response Guidance",
-  "User",
-];
-
-const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-const parsePromptSections = (prompt) => {
-  const text = String(prompt ?? "");
-  const pattern = new RegExp(`(^|\\n\\n)(${PROMPT_SECTION_HEADINGS.map(escapeRegExp).join("|")})\\n`, "g");
-  const marks = [];
-  let match;
-
-  while ((match = pattern.exec(text))) {
-    marks.push({
-      heading: match[2],
-      start: match.index + match[1].length,
-      bodyStart: match.index + match[0].length,
-    });
-  }
-
-  return marks.map((mark, index) => ({
-    ...mark,
-    end: index + 1 < marks.length ? Math.max(mark.bodyStart, marks[index + 1].start - 2) : text.length,
-  }));
-};
-
-const SHRINK_STEPS = [
-  { heading: "Conversation History", mode: "tail", min: 500, note: "older conversation omitted" },
-  { heading: "RAG Context", mode: "docs", min: 600, note: "retrieved documents trimmed" },
-  { heading: "User Memory", mode: "head", min: 400, note: "memory trimmed" },
-  { heading: "User Profile", mode: "head", min: 300, note: "profile trimmed" },
-  { heading: "Attachge", retryable: false, retryAfterMs: 0, deadModel: false });
-  }
-
-  if (status === 429 || groqCode === "rate_limit_exceeded") {
-    return build({ reason: "rate-limit", retryable: false, retryAfterMs, deadModel: false });
-  }
-
-  if (status >= 500) {
-    return build({ reason: "groq-server", retryable: true, retryAfterMs: 0, deadModel: false });
-  }
-
-  if (status === 400) {
-    return build({ reason: "bad-request", retryable: false, retryAfterMs: 0, deadModel: false });
-  }
-
-  return build({ reason: "unknown", retryable: true, retryAfterMs: 0, deadModel: false });
-};
-
-const logGroqFailure = (label, error) => {
-  const failure = describeGroqFailure(error);
-  logEvent(`${label} [groq:${failure.reason}]`, {
-    reason: failure.reason,
-    retryAfterMs: failure.retryAfterMs,
-    ...serializeError(error),
-  });
-  return failure;
-};
-
-// Remember a model's real tokens-per-minute ceiling the first time Groq states it.
-const learnTpmFromError = (model, error, failure) => {
-  const message = String(error?.response?.data?.error?.message || "");
-
-  if (!failure?.limit || !/tokens per minute|\bTPM\b/i.test(message)) {
-    return;
-  }
-
-  const key = String(model || "").trim().toLowerCase();
-
-  if (key && learnedTpmLimits.get(key) !== failure.limit) {
-    learnedTpmLimits.set(key, failure.limit);
-    logEvent("tpm-limit-learned", { model: key, limit: failure.limit });
-  }
-};
-
-// The old single fallback string told the user nothing and told us nothing.
-// Each reason now maps to a message that is true and actionable.
-const buildFallbackReply = (failure = null) => {
-  const reason = failure?.reason || "unknown";
-
-  if (reason === "rate-limit") {
-    const seconds = failure?.retryAfterMs ? Math.ceil(failure.retryAfterMs / 1000) : 0;
-    return seconds
-      ? `I have hit my request limit for the moment. Please try again in about ${seconds} second${seconds === 1 ? "" : "s"}.`
-      : "I have hit my request limit for the moment. Please try again in a few seconds.";
-  }
-
-  if (reason === "request-too-large") {
-    return "That request is still too large for the AI service's current limits, even after I trimmed the background context. Try a shorter message, or start a new chat and send it again.";
-  }
-
-  if (reason === "auth") {
-    return "I cannot authenticate with the AI service right now. This usually means the API key needs attention.";
-  }
-
-  if (reason === "model-unavailable") {
-    return "The model I was configured to use is not available right now. Please try again in a moment.";
-  }
-
-  if (reason === "timeout" || reason === "network" || reason === "groq-server") {
-    return "I could not reach the AI service just now. Please try again in a moment.";
-  }
-
-  return "I ran into a problem generating that answer. Please try again in a moment.";
-};
-
-/* ------------------------------------------------------------------ *
- * 3. Text helpers
- * ------------------------------------------------------------------ */
-
-const normalizeText = (value) => String(value ?? "").trim();
-
-const estimateTokenCount = (text) => Math.ceil(String(text ?? "").length / CHARS_PER_TOKEN_ESTIMATE);
-
-const getModelLimits = (model) => {
-  const normalizedModel = String(model || "").toLowerCase();
-
-  if (MODEL_LIMITS[normalizedModel]) {
-    return MODEL_LIMITS[normalizedModel];
-  }
-
-  return { context: DEFAULT_CONTEXT_TOKENS, maxCompletion: DEFAULT_MAX_COMPLETION_TOKENS };
-};
-
-// Clamping the completion request is the safe way to respect a model's output
-// ceiling. The old code shrank the *prompt* instead, which silently threw away
-// the user's own content to make room for tokens the model was never going to
-// emit.
-const clampCompletionTokens = (model, requestedTokens) => {
-  const { maxCompletion } = getModelLimits(model);
-  const requested = Number(requestedTokens) || MAIN_MAX_TOKENS;
-  return Math.max(64, Math.min(requested, maxCompletion));
-};
-
-const countCodeFences = (text) => (String(text ?? "").match(/```/g) || []).length;
-
-const hasUnbalancedCodeFence = (text) => countCodeFences(text) % 2 === 1;
-
-const TERMINAL_TAIL_PATTERN = /[.!?:;)\]}"'”’`|*_~%>。．！？；：、…।॥؟؛۔】」』）］》→✓]$/;
-
-const DANGLING_TAIL_PATTERN = /(?:\b(?:and|or|but|the|to|of|with|for|from|that|which|is|are|was|were|be|been|being|has|have|had|will|would|could|should|because|into|via|such|than|if|when|while|where|whose|although|however|therefore)\s*)$|[,;:\-–—(\[{/+=<&]$/i;
-
-const endsMidSentence = (text) => {
-  const trimmed = String(text ?? "").replace(/\s+$/, "");
-  if (!trimmed) return false;
-  if (TERMINAL_TAIL_PATTERN.test(trimmed)) return false;
-  if (DANGLING_TAIL_PATTERN.test(trimmed)) return true;
-
-  const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim();
-  if (!lastLine) return false;
-
-  // Headings, list items, table rows and fences are complete lines by design.
-  if (/^(#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\||```)/.test(lastLine)) return false;
-
-  const wordCount = lastLine.split(/\s+/).filter(Boolean).length;
-  return lastLine.length > 40 && wordCount >= 6 && !/[.!?…।。]/.test(lastLine);
-};
-
-const looksIncomplete = (text) => hasUnbalancedCodeFence(text) || endsMidSentence(text);
-
-const findOverlapLength = (base, addition, maxOverlap = 400) => {
-  const baseStr = String(base ?? "");
-  const addStr = String(addition ?? "");
-  const limit = Math.min(maxOverlap, baseStr.length, addStr.length);
-
-  for (let size = limit; size >= 24; size -= 1) {
-    if (baseStr.endsWith(addStr.slice(0, size))) {
-      return size;
-    }
-  }
-
-  return 0;
-};
-
-const stitchContinuation = (base, addition) => {
-  const baseStr = String(base ?? "");
-  let addStr = String(addition ?? "").replace(/\s+$/, "");
-
-  if (!addStr) return baseStr;
-  if (!baseStr) return addStr.replace(/^\s+/, "");
-
-  const overlap = findOverlapLength(baseStr, addStr.replace(/^\s+/, ""));
-  if (overlap) {
-    addStr = addStr.replace(/^\s+/, "").slice(overlap);
-    if (!addStr) return baseStr;
-  }
-
-  const startedWithBlockBreak = /^\s*\n/.test(addStr);
-  const trimmedAddition = addStr.replace(/^[ \t]+/, "").replace(/^\n+/, "");
-
-  if (!trimmedAddition) return baseStr;
-
-  const startsNewBlock = /^(#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|```|\|)/.test(trimmedAddition);
-  const baseEndsBlock = /\n$/.test(baseStr);
-
-  if (startsNewBlock || startedWithBlockBreak) {
-    const separator = baseEndsBlock ? "" : "\n\n";
-    return `${baseStr.replace(/\s+$/, "")}${separator}${trimmedAddition}`;
-  }
-
-  const baseTail = baseStr.slice(-1);
-  const additionHead = trimmedAddition.slice(0, 1);
-  const needsSpace = /[.!?,;:)\]"'’”]/.test(baseTail) || (/\w/.test(baseTail) && /[("'“]/.test(additionHead));
-
-  if (/\s/.test(baseTail)) {
-    return `${baseStr}${trimmedAddition}`;
-  }
-
-  return `${baseStr}${needsSpace ? " " : ""}${trimmedAddition}`;
-};
-
-// Cheap similarity check used to stop a continuation loop that has started
-// repeating itself rather than making progress.
-const isMostlyRepeat = (tail, addition) => {
-  const a = String(tail ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-  const b = String(addition ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-
-  if (!b) return true;
-  if (b.length < 24) return a.includes(b);
-
-  const probe = b.slice(0, Math.min(160, b.length));
-  return a.includes(probe);
-};
-
-const squeezeText = (text, maxChars, note = "content trimmed to fit the token budget") => {
-  const str = String(text ?? "");
-  if (str.length <= maxChars) return str;
-
-  const headChars = Math.floor(maxChars * 0.55);
-  const tailChars = Math.max(0, maxChars - headChars);
-
-  return [
-    str.slice(0, headChars),
-    `\n\n...[${str.length - maxChars} characters omitted — ${note}]...\n\n`,
-    str.slice(str.length - tailChars),
-  ].join("");
-};
-
-const keepHeadText = (text, maxChars, note) => {
-  const str = String(text ?? "");
-  if (str.length <= maxChars) return str;
-  return `${str.slice(0, Math.max(0, maxChars)).replace(/\s+$/, "")}\n...[${note}]...`;
-};
-
-const keepTailText = (text, maxChars, note) => {
-  const str = String(text ?? "");
-  if (str.length <= maxChars) return str;
-  return `...[${note}]...\n${str.slice(str.length - Math.max(0, maxChars)).replace(/^\s+/, "")}`;
+  return `[${note}]\n${str.slice(str.length - Math.max(0, maxChars)).replace(/^\s+/, "")}`;
 };
 
 /* ------------------------------------------------------------------ *
@@ -1153,18 +615,18 @@ const resolvePromptTokenBudget = ({ model, completionTokens, overheadTokens = 0,
  * ------------------------------------------------------------------ */
 
 const SCRIPT_RANGES = [
-  { language: "Bengali", pattern: /[ঀ-৿]/ },
-  { language: "Hindi", pattern: /[ऀ-ॿ]/ },
-  { language: "Tamil", pattern: /[஀-௿]/ },
-  { language: "Telugu", pattern: /[ఀ-౿]/ },
-  { language: "Gujarati", pattern: /[઀-૿]/ },
-  { language: "Arabic", pattern: /[؀-ۿ]/ },
-  { language: "Hebrew", pattern: /[֐-׿]/ },
-  { language: "Russian", pattern: /[Ѐ-ӿ]/ },
-  { language: "Greek", pattern: /[Ͱ-Ͽ]/ },
-  { language: "Japanese", pattern: /[぀-ヿ]/ },
-  { language: "Korean", pattern: /[가-힯]/ },
-  { language: "Chinese", pattern: /[一-鿿]/ },
+  { language: "Bengali", pattern: /[\u0980-\u09FF]/ },
+  { language: "Hindi", pattern: /[\u0900-\u097F]/ },
+  { language: "Tamil", pattern: /[\u0B80-\u0BFF]/ },
+  { language: "Telugu", pattern: /[\u0C00-\u0C7F]/ },
+  { language: "Gujarati", pattern: /[\u0A80-\u0AFF]/ },
+  { language: "Arabic", pattern: /[\u0600-\u06FF]/ },
+  { language: "Hebrew", pattern: /[\u0590-\u05FF]/ },
+  { language: "Russian", pattern: /[\u0400-\u04FF]/ },
+  { language: "Greek", pattern: /[\u0370-\u03FF]/ },
+  { language: "Japanese", pattern: /[\u3040-\u30FF]/ },
+  { language: "Korean", pattern: /[\uAC00-\uD7AF]/ },
+  { language: "Chinese", pattern: /[\u4E00-\u9FFF]/ },
 ];
 
 const NAMED_LANGUAGES = [
@@ -1219,12 +681,35 @@ const parseCountDirective = (text) => {
   return { count: 0, unit: "" };
 };
 
+// "difference between A and B", "differentiate", "A vs B", "compare A with B".
+// A bare "compare" is not enough ("compare two strings in JS" is a coding question).
+const detectComparisonRequest = (lower) =>
+  /\b(?:differences?|differentiate|distinguish|distinction)\b/i.test(lower)
+  || /\bcompar(?:e|ison|ing)\b[^.?!\n]{0,80}?\b(?:with|to|and|vs\.?|versus|between)\b/i.test(lower)
+  || /\b[\w-]+\s+(?:vs\.?|versus)\s+[\w-]+/i.test(lower);
+
+const COMPARISON_NUMBER_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+
+// Matches: "5 difference between X and Y", "give five key differences", "3 points of difference".
+const parseComparisonCount = (lower) => {
+  const match = lower.match(/\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:key|main|major|important|basic|primary)\s+)?(?:differences?|distinctions?|points?|ways|reasons)\b/);
+
+  if (!match) {
+    return 0;
+  }
+
+  const value = Number(match[1]) || COMPARISON_NUMBER_WORDS[match[1]] || 0;
+  return value >= 1 && value <= 20 ? value : 0;
+};
+
 const extractOutputDirectives = (query) => {
   const text = normalizeText(query);
   const lower = text.toLowerCase();
 
   const wantsTerse = /\b(briefly|be brief|in brief|concise|concisely|short answer|shortly|keep it short|one line|one-liner|in a nutshell|tl;?dr|summar(?:y|ise|ize) (?:it )?(?:in )?short|just the answer|straight answer|yes or no|quick(?:ly)? answer)\b/i.test(lower);
   const wantsDetail = /\b(in detail|in-depth|detailed|comprehensive|thorough(?:ly)?|deep dive|deep-dive|elaborate|at length|full explanation|explain everything|exhaustive|long answer|as much detail)\b/i.test(lower);
+  const wantsComparison = detectComparisonRequest(lower);
+  const comparisonCount = wantsComparison ? parseComparisonCount(lower) : 0;
 
   const { count, unit } = parseCountDirective(lower);
 
@@ -1251,6 +736,14 @@ const extractOutputDirectives = (query) => {
     rules.push("The user explicitly asked for detail. Be thorough: cover the reasoning, the edge cases, and the caveats, and use headings to keep it readable.");
   }
 
+  // A comparison is never answered with a few one-line bullets. A short-answer or exact-length
+  // instruction from the user still wins.
+  if (wantsComparison && !wantsTerse && !(count && unit)) {
+    rules.push(
+      `The user asked to compare or differentiate topics. Do not answer with one-line bullets. Give a Markdown table with the columns Basis | first topic | second topic and ${comparisonCount ? `exactly ${comparisonCount} rows` : "5 to 7 rows"}, then an Explanation section with a numbered list (1., 2., 3. and so on) that covers each row in the same order, ${comparisonCount ? `exactly ${comparisonCount} items, ` : ""}explaining each difference in 2 to 3 sentences with a concrete example or consequence, and finish with one line on when each applies.`
+    );
+  }
+
   if (wantsTable) rules.push("Present the core of the answer as a Markdown table.");
   if (wantsBullets) rules.push("Present the core of the answer as a bulleted list.");
   if (wantsSteps) rules.push("Present the core of the answer as numbered steps in the order they must be performed.");
@@ -1270,9 +763,14 @@ const extractOutputDirectives = (query) => {
     rules.push("The user wrote an Indic language using Latin letters. Reply in that same romanised style rather than switching to a native script or to formal English.");
   }
 
+  let lengthMode = "default";
+  if (count && unit) lengthMode = "exact";
+  else if (wantsTerse) lengthMode = "terse";
+  else if (wantsDetail || wantsComparison) lengthMode = "expansive";
+
   return {
     rules,
-    lengthMode: count && unit ? "exact" : (wantsTerse ? "terse" : (wantsDetail ? "expansive" : "default")),
+    lengthMode,
     exactCount: count,
     exactUnit: unit,
     wantsTable,
@@ -1285,6 +783,8 @@ const extractOutputDirectives = (query) => {
     wantsSimple,
     wantsExamples,
     wantsCitations,
+    wantsComparison,
+    comparisonCount,
     language,
   };
 };
@@ -1297,13 +797,15 @@ const countQuestionParts = (query) => {
 
   const questionMarks = (text.match(/\?/g) || []).length;
   const numbered = (text.match(/(?:^|\n)\s*(?:\d+[.)]|[-*•])\s+\S/g) || []).length;
+  // Exam-style lettered parts, for example (a) and (b), or 6(a) and 6(b).
+  const lettered = (text.match(/(?:^|\n)\s*(?:\d+\s*)?\(([a-h])\)[.:)]?\s+\S/gi) || []).length;
   const connectives = (text.match(/\b(?:and also|also,? (?:what|how|why|when|where|who|can|could|is|are|do|does)|as well as|plus,? |secondly|second,|thirdly|third,|finally,|lastly,)\b/gi) || []).length;
 
-  return Math.max(questionMarks, numbered, connectives ? connectives + 1 : 0);
+  return Math.max(questionMarks, numbered, lettered, connectives ? connectives + 1 : 0);
 };
 
 const buildMultiPartDirective = (partCount) => (partCount >= 2
-  ? `The user asked ${partCount} separate things in one message. Answer every one of them, in the order asked, each under its own short bold label or heading. Do not merge them into a single paragraph and do not silently skip any.`
+  ? `The user asked ${partCount} separate things in one message. Answer every one of them, in the order asked, each under its own short bold label or heading. Give every part its full depth: a later part must not be shorter or thinner than an earlier one. Do not merge them into a single paragraph and do not silently skip any.`
   : "");
 
 const SMALLTALK_PATTERN = /^(?:ok(?:ay)?|kk|k|yes|yep|yeah|yup|no|nope|nah|sure|right|correct|got it|understood|thanks?|thank you|thx|ty|cool|nice|great|perfect|awesome|good|fine|hmm+|hi|hey|hello|yo|bye|goodbye|good (?:morning|afternoon|evening|night)|np|no problem|welcome|sorry|please|continue|go on|next)[\s!.,?]*$/i;
@@ -1455,7 +957,13 @@ const resolveMaxTokens = (profile) => {
   if (profile?.isSmallTalk) return SMALLTALK_MAX_TOKENS;
   if (directives.lengthMode === "terse") return TERSE_MAX_TOKENS;
 
-  if (profile?.kind === "code") return CODE_MAIN_MAX_TOKENS;
+  // A multi-part answer that also contains a code program and a comparison table needs more room
+  // than a plain code answer, otherwise the later part is the one that gets squeezed.
+  if (profile?.kind === "code") {
+    return directives.wantsComparison || profile.partCount >= 2
+      ? CODE_MAIN_MAX_TOKENS + 1500
+      : CODE_MAIN_MAX_TOKENS;
+  }
   if (profile?.kind === "creative") return CREATIVE_MAIN_MAX_TOKENS;
   if (directives.lengthMode === "expansive") return Math.max(COMPLEX_MAIN_MAX_TOKENS, CREATIVE_MAIN_MAX_TOKENS);
   if (profile?.hasAttachmentAnalysis) {
@@ -1655,7 +1163,10 @@ const BASE_SYSTEM_RULES = [
 
 const FORMAT_SYSTEM_RULES = [
   "Match the length of your answer to the question: a factual or yes/no question gets one to three sentences, and only a genuinely multi-part or complex question earns headings and sections.",
+  "A request to explain the difference between, compare, or distinguish topics is NOT a short factual question: answer it with a comparison table followed by a numbered explanation of every row (2 to 3 sentences each, with a concrete example), never with a few one-line bullets.",
   "Use Markdown structure — ## headings, **bold**, tables, and numbered or bulleted lists — only when it makes a longer answer easier to read, never as decoration on a short one.",
+  "Number every ordered list in sequence (1., 2., 3. and so on) and never repeat the same number for several items, even when a code block or paragraph sits between two items.",
+  "Never put bold markers inside a heading or inside another bold span. Write a heading as plain text, and bold only a short key phrase.",
   "Put every code sample in a fenced block with its language tag, and make it complete enough to run or paste as-is.",
   "If the user's message is a short acknowledgement such as yes, ok, thanks, or right, use the recent conversation to decide whether it confirms something or simply acknowledges the last answer, then reply in one or two sentences without restating the previous answer.",
   "Do not ask a clarifying question unless the request is genuinely ambiguous and the context cannot resolve it. If you must ask, give your best attempt first and then ask.",
@@ -1665,6 +1176,7 @@ const KIND_SYSTEM_RULES = {
   code: [
     "This is a programming request. Be precise about names, versions, and file paths.",
     "Give working code rather than pseudocode, and state which file each block belongs in.",
+    "When asked to implement or demonstrate something, list the steps as one sequentially numbered list first, then give ONE complete, runnable program in a single fenced code block that contains every step in order (with a short comment marking each step) instead of splitting the code into a separate disconnected block per step. Show any requested output in its own block right after the program.",
     "Call out the specific line or condition that causes a bug when you are diagnosing one.",
     "Mention a caveat only when it would actually bite in practice.",
   ].join(" "),
@@ -2148,7 +1660,7 @@ const buildContextDigest = (prompt) => {
   if (!text) return "";
   if (text.length <= CONTEXT_DIGEST_CHARS) return text;
   // The tail of a formatted prompt holds the real question and the answer cue.
-  return `...${text.slice(text.length - CONTEXT_DIGEST_CHARS)}`;
+  return `[earlier text omitted] ${text.slice(text.length - CONTEXT_DIGEST_CHARS)}`;
 };
 
 const completeResponse = async ({ query, prompt, initialContent, model, profile, budget, signal }) => {
@@ -2265,6 +1777,7 @@ const auditDraft = (draft, profile) => {
     if (sentences > directives.exactCount + 1) issues.push("ignored-sentence-count");
   }
   if (directives.wantsTable && !/\|.*\|/.test(text)) issues.push("missing-requested-table");
+  if (directives.wantsComparison && directives.lengthMode === "expansive" && !/\|.*\|/.test(text)) issues.push("missing-comparison-table");
   if (directives.wantsBullets && !/(?:^|\n)\s*[-*+]\s+\S/.test(text)) issues.push("missing-requested-bullets");
   if (directives.wantsSteps && !/(?:^|\n)\s*\d+[.)]\s+\S/.test(text)) issues.push("missing-requested-steps");
   if (directives.wantsJson && !/[{[]/.test(text)) issues.push("missing-requested-json");
