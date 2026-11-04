@@ -1,5 +1,4 @@
 //back-end/rag/ragPipeline.js
-
 const { createEmbedding } = require("./embedder.js");
 const { loadDB } = require("./vectorStore.js");
 
@@ -27,6 +26,7 @@ const cosineSimilarity = (left, right) => {
   for (let index = 0; index < length; index += 1) {
     const leftValue = Number(left[index]) || 0;
     const rightValue = Number(right[index]) || 0;
+
     dotProduct += leftValue * rightValue;
     leftMagnitude += leftValue * leftValue;
     rightMagnitude += rightValue * rightValue;
@@ -71,9 +71,11 @@ const formatConversationContext = (conversation = []) => {
     .map((entry) => {
       const role = String(entry?.role || "").toLowerCase();
       const content = String(entry?.content || "").trim();
+
       if (!content) {
         return null;
       }
+
       const label = role === "assistant" ? "Assistant" : "User";
       return `${label}: ${content}`;
     })
@@ -148,6 +150,7 @@ const formatRetrievedDoc = (doc, index = 0) => {
 
   const metadata = normalizeMetadata(doc?.metadata);
   const sourceBits = [];
+
   if (metadata.title) sourceBits.push(metadata.title);
   if (metadata.source) sourceBits.push(metadata.source);
   if (metadata.type) sourceBits.push(metadata.type);
@@ -155,9 +158,11 @@ const formatRetrievedDoc = (doc, index = 0) => {
 
   const scoreText = Number.isFinite(Number(doc?.score)) ? `score=${Number(doc.score).toFixed(3)}` : "";
   const headerParts = [`Doc ${index + 1}`];
+
   if (sourceBits.length) {
     headerParts.push(sourceBits.join(" | "));
   }
+
   if (scoreText) {
     headerParts.push(scoreText);
   }
@@ -169,14 +174,17 @@ const formatRetrievedDocs = (docs = []) => {
   if (!Array.isArray(docs) || !docs.length) {
     return "";
   }
+
   return docs.map(formatRetrievedDoc).filter(Boolean).join("\n\n");
 };
 
 const normalizeResponseStyle = (value) => {
   const normalizedStyle = normalizePromptText(value).toLowerCase();
+
   if (["concise", "structured", "detailed", "friendly"].includes(normalizedStyle)) {
     return normalizedStyle;
   }
+
   return "balanced";
 };
 
@@ -210,9 +218,11 @@ const formatAttachmentContext = (attachments = []) => {
   const lines = attachments
     .map((attachment, index) => {
       const parts = [`Attachment ${index + 1}`];
+
       if (attachment?.name) parts.push(`Name: ${attachment.name}`);
       if (attachment?.type) parts.push(`Type: ${attachment.type}`);
       if (Number.isFinite(Number(attachment?.size))) parts.push(`Size: ${Number(attachment.size)} bytes`);
+
       return parts.join(" | ");
     })
     .filter(Boolean)
@@ -231,11 +241,12 @@ const isCreativeGenerationRequest = (query) => /\b(song|lyrics|poem|poetry|story
 
 const isCodeOrTutorialRequest = (query) => /\b(code|snippet|example|tutorial|walkthrough|setup|install|guide|step by step|step-by-step|sinatra|erb|ruby|bash|shell|html|css|javascript|typescript|python|react|node|sql)\b/i.test(normalizePromptText(query));
 
-// "difference between A and B", "A vs B", "compare A with B", "distinguish X from Y"
+// Matches: "difference between A and B", "A vs B", "compare A with B", "distinguish A from B".
 // A bare "compare" is not enough ("compare two strings in JS" is a coding question), so the
 // verb has to be followed by a second subject.
 const isComparisonRequest = (query) => {
   const text = normalizePromptText(query);
+
   if (!text) {
     return false;
   }
@@ -247,19 +258,21 @@ const isComparisonRequest = (query) => {
 
 const NUMBER_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
 
-// "5 difference between X and Y", "give five key differences", "3 points of difference"
+// Matches: "5 difference between X and Y", "give five key differences", "3 points of difference".
 const parseRequestedPointCount = (query) => {
   const text = normalizePromptText(query).toLowerCase();
   const match = text.match(/\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:key|main|major|important|basic|primary)\s+)?(?:differences?|distinctions?|points?|ways|reasons)\b/);
+
   if (!match) {
     return 0;
   }
+
   const raw = match[1];
   const value = Number(raw) || NUMBER_WORDS[raw] || 0;
   return value >= 1 && value <= 20 ? value : 0;
 };
 
-// Exam-style question made of lettered parts, e.g. part (a) followed by part (b), or 6(a) and 6(b).
+// An exam-style question made of lettered parts, for example (a) and (b), or 6(a) and 6(b).
 const countLetteredParts = (query) => {
   const text = normalizePromptText(query);
   return (text.match(/(?:^|\n)\s*(?:\d+\s*)?\(([a-h])\)[.:)]?\s+\S/gi) || []).length;
@@ -269,14 +282,12 @@ const buildCompletionInstruction = (query) => {
   const isCreative = isCreativeGenerationRequest(query);
   const isCodeOrTutorial = isCodeOrTutorialRequest(query);
   const isStepByStep = isStepByStepRequest(query);
-
   // An explicit "briefly" or "in 2 sentences" from the user outranks the detailed comparison layout.
   const wantsShortAnswer = /\b(?:briefly|be brief|in brief|concise|concisely|short answer|keep it short|one line|one-liner|in a nutshell|tl;?dr|just the answer|quick(?:ly)? answer)\b/i.test(normalizePromptText(query))
     || /\bin\s+(?:about\s+|around\s+|under\s+|no more than\s+|at most\s+)?\d{1,4}\s*(?:words?|sentences?|lines?)\b/i.test(normalizePromptText(query));
   const isComparison = isComparisonRequest(query) && !wantsShortAnswer;
   const requestedPoints = parseRequestedPointCount(query);
   const letteredParts = countLetteredParts(query);
-
   const parts = [];
 
   if (isStepByStep) {
@@ -296,8 +307,12 @@ const buildCompletionInstruction = (query) => {
       "Fully complete the requested code, setup steps, or example instead of stopping mid-snippet.",
       "Include the remaining lines, missing closing tags, and any needed follow-up steps so the answer is usable as-is.",
       "Do not summarize away the code when the user asked for a concrete example.",
-      "When the task is to implement, build, or demonstrate something in code, first list the steps as ONE sequentially numbered list (1., 2., 3., and so on, each number used exactly once, in order), with a single plain sentence per step and no code between the steps.",
-      "Then give ONE complete, runnable program in a single fenced code block that contains every step in the same order, with a short comment marking each step. Do NOT split the program into a separate code block per step, and never leave a step's code in a disconnected fragment.",
+      "When the task is to implement, build, or demonstrate something in code,",
+      "first list the steps as ONE sequentially numbered list (1., 2., 3. and so on),",
+      "each number used exactly once, in order, with a single plain sentence per step and no code between the steps.",
+      "Then give ONE complete, runnable program in a single fenced code block that contains every step in the same order,",
+      "with a short comment marking each step.",
+      "Do NOT split the program into a separate code block per step, and never leave a step's code in a disconnected fragment.",
       "If the user asks for output, show it in its own fenced block labelled Output directly after the full program, with values that are consistent with the code.",
       "Shell or setup commands may stay in one block per phase, but keep related commands together.",
     ].join(" "));
@@ -314,7 +329,9 @@ const buildCompletionInstruction = (query) => {
     parts.push([
       "Comparison request detected. Never answer a comparison with a handful of one-line bullets.",
       `Structure the answer in three parts. (1) A Markdown comparison table with the columns Basis | <first topic> | <second topic> and ${requestedPoints ? `exactly ${requestedPoints} rows` : "5 to 7 rows"}, one row per point of difference.`,
-      `(2) Directly under the table, a short heading Explanation followed by a numbered list (1., 2., 3., and so on) with ${requestedPoints ? `exactly ${requestedPoints} items` : "one item per table row"}, in the same order as the table. Each item must explain the difference in 2 to 3 sentences and include a concrete example, cause, or consequence.`,
+      `(2) Directly under the table, a short heading Explanation followed by a numbered list (1., 2., 3. and so on) ` +
+      `with ${requestedPoints ? `exactly ${requestedPoints} items` : "one item per table row"}, in the same order as the table. ` +
+      "Each item must explain the difference in 2 to 3 sentences and include a concrete example, cause, or consequence.",
       "(3) A closing line that states when each topic applies, or the key takeaway.",
       "Use the same terms in the table and in the explanation, and make every point a genuine difference rather than a restatement of another point.",
     ].join(" "));
@@ -333,9 +350,11 @@ const buildCompletionInstruction = (query) => {
 
 const buildSection = (title, content) => {
   const normalizedContent = normalizePromptText(content);
+
   if (!normalizedContent) {
     return "";
   }
+
   return [title, normalizedContent].join("\n");
 };
 
@@ -354,6 +373,7 @@ const formatPrompt = ({
 }) => {
   const sections = [];
   const structuredFormatRequested = isStructuredFormatRequest(query);
+  const stepByStepRequested = isStepByStepRequest(query);
 
   sections.push(buildSection("System Identity", [
     "You are Quantic AI.",
@@ -362,13 +382,21 @@ const formatPrompt = ({
     "Prefer the smallest sufficient context set instead of repeating everything.",
     "Do not use emojis, decorative symbols, or emoji-style bullets unless the user explicitly asks for them.",
     buildStyleInstruction(responseStyle),
-    "When answering a definition, identification, or 'which of the following' question, wrap the key term or phrase that directly answers the question in **double asterisks** (markdown bold) — for example: **The Heisenberg Uncertainty Principle** states that. Bold only the defining term/phrase itself, not the whole sentence.",
-    "Number every ordered list in sequence (1., 2., 3., and so on) and never repeat the same number, even when a code block or paragraph sits between two items. Never put bold markers inside a heading or inside another bold span; write a heading as plain text.",
+    "When answering a definition, identification, or 'which of the following' question, " +
+      "wrap the key term or phrase that directly answers the question in **double asterisks** (markdown bold), " +
+      "for example: **The Heisenberg Uncertainty Principle** limits how precisely position and momentum can be known together. " +
+      "Bold only the defining term or phrase itself, not the whole sentence.",
+    "Number every ordered list in sequence (1., 2., 3. and so on) and never repeat the same number, " +
+      "even when a code block or paragraph sits between two items. " +
+      "Never put bold markers inside a heading or inside another bold span; write a heading as plain text.",
     structuredFormatRequested
       ? "Format this answer as a structured response with numbered points, and include quantitative details when they are helpful."
       : "",
+    stepByStepRequested
+      ? ""
+      : "",
     buildCompletionInstruction(query),
-  ].filter(Boolean).join("\n")));
+  ].join("\n")));
 
   if (profileContext) {
     sections.push(buildSection("User Profile", formatContextValue(profileContext)));
@@ -379,15 +407,19 @@ const formatPrompt = ({
   }
 
   const ragPieces = [];
+
   if (Array.isArray(docs) && docs.length) {
     ragPieces.push(formatRetrievedDocs(docs));
   }
+
   if (toolContext) {
     ragPieces.push(`Tool Context:\n${formatContextValue(toolContext)}`);
   }
+
   if (webContext) {
     ragPieces.push(`Web Context:\n${formatContextValue(webContext)}`);
   }
+
   if (ragPieces.length) {
     sections.push(buildSection("RAG Context", ragPieces.join("\n\n")));
   }
@@ -425,7 +457,14 @@ const formatPrompt = ({
       "Prefer a complete short summary or a complete numbered list over a partial outline.",
       "Do not say that you cannot view the attachment when attachment analysis is present.",
       isCodeAttachment
-        ? "This attachment is source code. Read it sequentially from top to bottom — do not skim or jump straight to a summary. Walk through it in order (imports, then each function/class/component), and when reviewing or explaining it, follow that same top-to-bottom order, referencing specific line ranges, function names, or short excerpts under 15 words. If a marker saying characters were omitted appears in the extracted text, explicitly tell the user the file was too large to read in full and name which part was cut."
+        ? [
+          "This attachment is source code. Read it sequentially from top to bottom; do not skim or jump straight to a summary.",
+          "Walk through it in order (imports, then each function, class, or component),",
+          "and when reviewing or explaining it, follow that same top-to-bottom order,",
+          "referencing specific line ranges, function names, or short excerpts under 15 words.",
+          "If a marker saying characters were omitted appears in the extracted text,",
+          "explicitly tell the user the file was too large to read in full and name which part was cut.",
+        ].join(" ")
         : "",
     ].filter(Boolean).join("\n")));
   }
