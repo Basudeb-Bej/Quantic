@@ -12,7 +12,9 @@ const {
 	getDeviceIdFromRequest,
 	buildUserProfile,
 	getJwtSecret,
+	getTokenFromRequest,
 } = require("../middleware/auth");
+const RevokedToken = require("../models/RevokedTokenModel");
 const { getSystemSettings } = require("../models/SystemSettingsModel");
 
 const isDatabaseConnected = () => User?.db?.readyState === 1;
@@ -29,7 +31,7 @@ const rejectIfDatabaseUnavailable = (res) => {
 	return true;
 };
 
-const HASH_ITERATIONS = 120000;
+const HASH_ITERATIONS = 210000; // OWASP minimum for PBKDF2-SHA512; older hashes are upgraded on login
 const HASH_LENGTH = 64;
 const HASH_DIGEST = "sha512";
 
@@ -44,31 +46,42 @@ const createToken = (user) =>
 		{
 			subject: String(user._id),
 			expiresIn: "7d",
+			jwtid: crypto.randomUUID(),
 		}
 	);
 
-const hashPassword = (password, salt = crypto.randomBytes(16).toString("hex")) => {
-	const derivedKey = crypto
-		.pbkdf2Sync(password, salt, HASH_ITERATIONS, HASH_LENGTH, HASH_DIGEST)
-		.toString("hex");
+const pbkdf2Async = (password, salt, iterations, length) =>
+	new Promise((resolve, reject) => {
+		crypto.pbkdf2(password, salt, iterations, length, HASH_DIGEST, (error, key) => (error ? reject(error) : resolve(key)));
+	});
 
+// Async so hashing (~200 ms) never blocks the event loop for other users.
+const hashPassword = async (password, salt = crypto.randomBytes(16).toString("hex")) => {
+	const derivedKey = (await pbkdf2Async(password, salt, HASH_ITERATIONS, HASH_LENGTH)).toString("hex");
 	return `pbkdf2$${HASH_ITERATIONS}$${salt}$${derivedKey}`;
 };
 
-const verifyPassword = (password, storedHash) => {
-	const [scheme, iterationsText, salt, derivedKey] = storedHash.split("$");
+const verifyPassword = async (password, storedHash) => {
+	try {
+		const [scheme, iterationsText, salt, derivedKey] = String(storedHash || "").split("$");
+		const iterations = Number(iterationsText);
 
-	if (scheme !== "pbkdf2" || !iterationsText || !salt || !derivedKey) {
+		if (scheme !== "pbkdf2" || !Number.isInteger(iterations) || iterations < 1000 || !salt || !derivedKey) {
+			return false;
+		}
+
+		const computed = await pbkdf2Async(password, salt, iterations, derivedKey.length / 2);
+		const expected = Buffer.from(derivedKey, "hex");
+		return computed.length === expected.length && crypto.timingSafeEqual(computed, expected);
+	} catch {
 		return false;
 	}
-
-	const iterations = Number(iterationsText);
-	const computedHash = crypto
-		.pbkdf2Sync(password, salt, iterations, derivedKey.length / 2, HASH_DIGEST)
-		.toString("hex");
-
-	return crypto.timingSafeEqual(Buffer.from(computedHash, "hex"), Buffer.from(derivedKey, "hex"));
 };
+
+const needsRehash = (storedHash) => Number(String(storedHash || "").split("$")[1]) < HASH_ITERATIONS;
+
+// Verified against when the email is unknown so response time does not reveal which emails exist.
+const DUMMY_PASSWORD_HASH = `pbkdf2$${HASH_ITERATIONS}$${"0".repeat(32)}$${"0".repeat(HASH_LENGTH * 2)}`;
 
 // const getDeviceFingerprint = (req) => {
 // 	const userAgent = String(req?.headers?.["user-agent"] || "unknown");
@@ -173,7 +186,7 @@ const issueRegistrationOtp = async ({ email, name, passwordHash, discardOnFailur
 // ---------------------------------------------------------------------------
 // Login rate limiting: 3 failures => locked for 15 minutes
 // ---------------------------------------------------------------------------
-const MAX_LOGIN_ATTEMPTS = 3;
+const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
 
 const getLockRemainingMs = (user) =>
@@ -249,11 +262,12 @@ const changePassword = async (req, res, next) => {
 			return res.status(404).json({ message: "User not found." });
 		}
 
-		if (!verifyPassword(trimmedCurrentPassword, user.passwordHash)) {
+		if (!(await verifyPassword(trimmedCurrentPassword, user.passwordHash))) {
 			return res.status(401).json({ message: "Current password is incorrect." });
 		}
 
-		user.passwordHash = hashPassword(trimmedNewPassword);
+		user.passwordHash = await hashPassword(trimmedNewPassword);
+		user.tokensValidAfter = new Date(); // sign out every other session
 		await user.save();
 
 		return res.status(200).json({
@@ -315,7 +329,7 @@ const registerUser = async (req, res, next) => {
 			await issueRegistrationOtp({
 				email: trimmedEmail,
 				name: trimmedName,
-				passwordHash: hashPassword(trimmedPassword),
+				passwordHash: await hashPassword(trimmedPassword),
 				discardOnFailure: !pending,
 			});
 		} catch (error) {
@@ -508,20 +522,26 @@ const loginUser = async (req, res, next) => {
 			return respondLocked(res, lockRemainingMs);
 		}
 
-		if (!user || !verifyPassword(trimmedPassword, user.passwordHash)) {
+		const passwordOk = user
+			? await verifyPassword(trimmedPassword, user.passwordHash)
+			: (await verifyPassword(trimmedPassword, DUMMY_PASSWORD_HASH), false);
+
+		if (!passwordOk) {
 			if (user) {
 				const failure = await recordFailedLogin(user);
 
 				if (failure.locked) {
 					return respondLocked(res, failure.remainingMs);
 				}
-
-				return res.status(401).json({
-					message: `Invalid email or password. ${failure.attemptsRemaining} attempt${failure.attemptsRemaining === 1 ? "" : "s"} remaining before a 15-minute lock.`,
-				});
 			}
 
+			// Same message whether or not the account exists, so emails cannot be enumerated.
 			return res.status(401).json({ message: "Invalid email or password." });
+		}
+
+		if (needsRehash(user.passwordHash)) {
+			user.passwordHash = await hashPassword(trimmedPassword);
+			await user.save().catch(() => {});
 		}
 
 		// Legacy row from an earlier version that saved accounts before the code was entered.
@@ -533,9 +553,9 @@ const loginUser = async (req, res, next) => {
 		const twoFactorEnabled = settingsDocument?.twoFactorEnabled === true;
 
 		if (twoFactorEnabled) {
-			const otp = Math.floor(100000 + Math.random() * 900000).toString();
+			const otp = generateOtp();
 
-			user.twoFactorOtp = otp;
+			user.twoFactorOtp = hashOtp(otp);
 			user.twoFactorOtpExpires = new Date(Date.now() + 10 * 60 * 1000);
 			await user.save();
 
@@ -595,7 +615,7 @@ const verifyLoginOtp = async (req, res, next) => {
 		);
 
 		if (!user) {
-			return res.status(404).json({ message: "User not found." });
+			return res.status(400).json({ message: "Invalid verification code." });
 		}
 
 		const lockRemainingMs = getLockRemainingMs(user);
@@ -604,7 +624,7 @@ const verifyLoginOtp = async (req, res, next) => {
 			return respondLocked(res, lockRemainingMs);
 		}
 
-		if (!user.twoFactorOtp || user.twoFactorOtp !== trimmedOtp) {
+		if (!user.twoFactorOtp || !otpMatches(user.twoFactorOtp, trimmedOtp)) {
 			// Wrong 2FA codes count toward the same lock, otherwise a 6-digit code could be brute-forced.
 			const failure = await recordFailedLogin(user);
 
@@ -802,7 +822,8 @@ const resetPassword = async (req, res, next) => {
 			});
 		}
 
-		user.passwordHash = hashPassword(trimmedPassword);
+		user.passwordHash = await hashPassword(trimmedPassword);
+		user.tokensValidAfter = new Date(); // a reset must end any session an attacker may hold
 
 		user.resetOtp = null;
 		user.resetOtpExpires = null;
@@ -825,6 +846,18 @@ const getCurrentUser = async (req, res) => {
 };
 
 const logoutUser = async (req, res) => {
+	// Revoke the presented token so a copied token cannot be replayed after logout.
+	try {
+		const token = getTokenFromRequest(req);
+		const decoded = token ? jwt.verify(token, getJwtSecret()) : null;
+
+		if (decoded?.jti && decoded?.exp) {
+			await RevokedToken.updateOne({ jti: decoded.jti }, { $set: { expiresAt: new Date(decoded.exp * 1000) } }, { upsert: true });
+		}
+	} catch {
+		// already expired / invalid / DB down: still clear the cookie below
+	}
+
 	res.setHeader("Set-Cookie", buildClearedCookie());
 	return res.status(200).json({ message: "Logged out successfully." });
 };
@@ -990,6 +1023,7 @@ module.exports = {
 	getCurrentUser,
 	changePassword,
 	logoutUser,
+	__test: { hashPassword, verifyPassword, needsRehash },
 	submitFeedback,
 	deleteAccount,
 	cancelAccountDeletion,

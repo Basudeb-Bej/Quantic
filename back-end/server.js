@@ -51,7 +51,7 @@ const allowedOrigins = [
   ),
 ];
 const requestBodyLimit = process.env.REQUEST_BODY_LIMIT || "1mb";
-const chatRequestBodyLimit = process.env.CHAT_REQUEST_BODY_LIMIT || "100mb";
+const chatRequestBodyLimit = process.env.CHAT_REQUEST_BODY_LIMIT || "25mb";
 const apiLimiter = rateLimit({
 	windowMs: 15 * 60 * 1000,
 	limit: Number(process.env.RATE_LIMIT_MAX_REQUESTS || 200),
@@ -165,12 +165,20 @@ app.use((req, res, next) => {
   return defaultJsonParser(req, res, next);
 });
 
+// Cookie auth uses SameSite=None across sites, so reject state-changing requests whose Origin is not
+// an allowed frontend (CSRF defence). Requests with no Origin header (curl, server-to-server) pass.
 app.use((req, res, next) => {
-  if (req.path.startsWith("/api/chat")) {
-    return chatUrlencodedParser(req, res, next);
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+    return next();
   }
 
-  return defaultUrlencodedParser(req, res, next);
+  const origin = String(req.headers.origin || "").trim().replace(/\/+$/, "");
+
+  if (origin && !allowedOrigins.includes(origin)) {
+    return res.status(403).json({ message: "Origin not allowed." });
+  }
+
+  return next();
 });
 app.use(apiLimiter);
 

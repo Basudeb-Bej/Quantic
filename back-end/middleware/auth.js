@@ -2,6 +2,7 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/LoginModel");
 const Settings = require("../models/SettingsModel");
+const RevokedToken = require("../models/RevokedTokenModel");
 const { getSystemSettings } = require("../models/SystemSettingsModel");
 
 const isTokenRevoked = async (decoded) => {
@@ -17,6 +18,17 @@ const isTokenRevoked = async (decoded) => {
 	} catch {
 		return false;
 	}
+};
+
+// Logged-out tokens (jti denylist) and tokens issued before a password change are rejected.
+const isSessionInvalidated = (decoded, user, denied) => {
+	if (denied) return true;
+
+	if (user?.tokensValidAfter && decoded?.iat) {
+		return decoded.iat < Math.floor(new Date(user.tokensValidAfter).getTime() / 1000);
+	}
+
+	return false;
 };
 
 const defaultUserSettings = {
@@ -110,7 +122,20 @@ const TOKEN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DEVICE_COOKIE_NAME = "device_id";
 const DEVICE_COOKIE_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000;
 
-const getJwtSecret = () => process.env.JWT_SECRET || "quantic-ai-development-secret";
+const getJwtSecret = () => {
+	const secret = process.env.JWT_SECRET;
+
+	if (secret && secret.length >= 16) {
+		return secret;
+	}
+
+	// A guessable fallback lets anyone forge tokens (including admin), so never allow it in production.
+	if (isProduction()) {
+		throw new Error("JWT_SECRET must be set (16+ characters) in production.");
+	}
+
+	return "quantic-ai-development-secret";
+};
 
 const buildUserProfile = async (user) => {
 	const settingsDocument = await Settings.findById(user._id).lean();
@@ -207,13 +232,17 @@ const authenticate = async (req, res, next) => {
 			return res.status(401).json({ message: "Not authenticated." });
 		}
 
-		if (await isTokenRevoked(decoded)) {
+		const [globallyRevoked, user, denied] = await Promise.all([
+			isTokenRevoked(decoded),
+			User.findById(userId),
+			decoded.jti ? RevokedToken.exists({ jti: decoded.jti }).catch(() => null) : null,
+		]);
+
+		if (globallyRevoked) {
 			return res.status(401).json({ message: "Session expired. Please log in again." });
 		}
 
-		const user = await User.findById(userId);
-
-		if (!user) {
+		if (!user || isSessionInvalidated(decoded, user, denied)) {
 			return res.status(401).json({ message: "Not authenticated." });
 		}
 
@@ -251,13 +280,13 @@ const optionalAuthenticate = async (req, res, next) => {
 			return next();
 		}
 
-		if (await isTokenRevoked(decoded)) {
-			return next();
-		}
+		const [globallyRevoked, user, denied] = await Promise.all([
+			isTokenRevoked(decoded),
+			User.findById(userId),
+			decoded.jti ? RevokedToken.exists({ jti: decoded.jti }).catch(() => null) : null,
+		]);
 
-		const user = await User.findById(userId);
-
-		if (!user) {
+		if (globallyRevoked || !user || isSessionInvalidated(decoded, user, denied)) {
 			return next();
 		}
 
@@ -299,6 +328,7 @@ module.exports = {
 	getDeviceIdFromRequest,
 	buildUserProfile,
 	getJwtSecret,
+	getTokenFromRequest,
 	normalizeUserSettings,
 	defaultUserSettings,
 	parseCookies,

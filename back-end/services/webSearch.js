@@ -24,12 +24,12 @@ const PREVIEW_CONCURRENCY = Number(process.env.WEB_PREVIEW_CONCURRENCY || 4);
 
 // How much of a page we are willing to pull down and keep.
 const PREVIEW_MAX_BYTES = Number(process.env.WEB_PREVIEW_MAX_BYTES || 320000);
-const PREVIEW_TEXT_CHARS = Number(process.env.WEB_PREVIEW_TEXT_CHARS || 2600);
+const PREVIEW_TEXT_CHARS = Number(process.env.WEB_PREVIEW_TEXT_CHARS || 4000);
 
 // What actually reaches the model.
 const CONTEXT_SOURCE_LIMIT = Number(process.env.WEB_CONTEXT_SOURCE_LIMIT || 8);
-const CONTEXT_CHAR_BUDGET = Number(process.env.WEB_CONTEXT_CHAR_BUDGET || 7000);
-const EVIDENCE_CHARS = Number(process.env.WEB_EVIDENCE_CHARS || 340);
+const CONTEXT_CHAR_BUDGET = Number(process.env.WEB_CONTEXT_CHAR_BUDGET || 14000);
+const EVIDENCE_CHARS = Number(process.env.WEB_EVIDENCE_CHARS || 900);
 
 // Caching. Repeated or lightly rephrased questions reuse the same HTTP work.
 const SEARCH_CACHE_TTL_MS = Number(process.env.WEB_SEARCH_CACHE_TTL_MS || 180000);
@@ -1382,10 +1382,11 @@ const searchTavily = async (query, deadline, { news = false } = {}) => {
 			body: JSON.stringify({
 				query: normalizedQuery,
 				topic: news ? "news" : "general",
-				search_depth: "basic",
+				search_depth: process.env.TAVILY_SEARCH_DEPTH || "advanced",
 				max_results: TAVILY_MAX_RESULTS,
 				include_answer: false,
 				include_raw_content: false,
+				...(news ? { days: 7 } : {}),
 			}),
 		}, TAVILY_TIMEOUT_MS, deadline);
 
@@ -2768,6 +2769,8 @@ const searchWeb = async (query, options = {}) => {
 };
 
 module.exports = {
+	fetchPagePreview,
+	createDeadline,
 	searchWeb,
 	searchWebDetailed,
 	formatWebSearchContext,

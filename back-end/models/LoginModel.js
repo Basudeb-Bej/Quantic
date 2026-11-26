@@ -25,6 +25,10 @@ const userSchema = new mongoose.Schema(
 			enum: ["user", "admin"],
 			default: "user",
 		},
+		tokensValidAfter: {
+			type: Date,
+			default: null,
+		},
 		banned: {
 			type: Boolean,
 			default: false,

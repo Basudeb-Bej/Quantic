@@ -4,10 +4,10 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test tests/agent.test.js tests/auth.test.js tests/chat.integration.test.js tests/image.test.js tests/routing.test.js",
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "type": "module"
+    "ingest": "node scripts/ingest.js"
   },
   "keywords": [],
   "author": "",

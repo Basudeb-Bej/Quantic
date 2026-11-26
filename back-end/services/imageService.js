@@ -1,5 +1,6 @@
 //back-end/services/imageService.js
 const axios = require("axios");
+const sharp = require("sharp");
 const logger = console;
 
 // Current Pollinations endpoint (the old image.pollinations.ai/prompt is legacy).
@@ -12,8 +13,8 @@ const IMAGE_ENHANCE = String(process.env.IMAGE_ENHANCE || "true") === "true";
 const IMAGE_NEGATIVE_PROMPT =
   process.env.IMAGE_NEGATIVE_PROMPT ||
   "blurry, low quality, low resolution, distorted, deformed, extra limbs, watermark, text, jpeg artifacts, cropped, cut off, out of frame";
-const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_TIMEOUT_MS || 60000);
-const MAX_IMAGE_GEN_ATTEMPTS = Number(process.env.MAX_IMAGE_GEN_ATTEMPTS || 3);
+const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_TIMEOUT_MS || 50000);
+const MAX_IMAGE_GEN_ATTEMPTS = Number(process.env.MAX_IMAGE_GEN_ATTEMPTS || 2);
 const MIN_REQUEST_GAP_MS = Number(process.env.IMAGE_MIN_REQUEST_GAP_MS || 1000);
 const IMAGE_REQUEST_HEADERS = {
   Accept: "image/*,*/*;q=0.8",
@@ -46,22 +47,55 @@ logEvent("loaded", {
 });
 
 
-let queueTail = Promise.resolve();
+// A small pool instead of one global queue: a slow job no longer blocks everyone, each user may have
+// only one image in flight, and an overloaded server answers "busy" instead of stacking requests.
+const MAX_CONCURRENT = Math.max(1, Number(process.env.IMAGE_MAX_CONCURRENT || 2));
+const MAX_WAITING = Math.max(0, Number(process.env.IMAGE_MAX_QUEUE || 8));
+let activeJobs = 0;
 let lastRequestAt = 0;
+const waiting = [];
+const inFlightKeys = new Set();
 
-const runQueued = (task) => {
-  const run = async () => {
+const acquireSlot = () => new Promise((resolve, reject) => {
+  if (activeJobs < MAX_CONCURRENT) {
+    activeJobs += 1;
+    resolve();
+  } else if (waiting.length >= MAX_WAITING) {
+    reject(new Error("BUSY"));
+  } else {
+    waiting.push(resolve);
+  }
+});
+
+const releaseSlot = () => {
+  const next = waiting.shift();
+  if (next) next();
+  else activeJobs -= 1;
+};
+
+const runQueued = async (task, key) => {
+  if (key && inFlightKeys.has(key)) {
+    return { success: false, error: "You already have an image being generated. Please wait for it to finish." };
+  }
+
+  if (key) inFlightKeys.add(key);
+
+  try {
+    await acquireSlot();
+  } catch {
+    if (key) inFlightKeys.delete(key);
+    return { success: false, error: "Image generation is busy right now. Please try again in a minute." };
+  }
+
+  try {
     const waitFor = Math.max(0, lastRequestAt + MIN_REQUEST_GAP_MS - Date.now());
-    if (waitFor > 0) {
-      await delay(waitFor);
-    }
-    lastRequestAt = Date.now();
-    return task();
-  };
-
-  const result = queueTail.then(run, run);
-  queueTail = result.catch(() => {});
-  return result;
+    lastRequestAt = Date.now() + waitFor;
+    if (waitFor > 0) await delay(waitFor);
+    return await task();
+  } finally {
+    releaseSlot();
+    if (key) inFlightKeys.delete(key);
+  }
 };
 
 // Finished image prompts ("A stunning BMW ..., photorealistic, 85mm lens, HDR, 8K") often have no
@@ -145,11 +179,24 @@ const isImageGenerationQuery = (query) => {
     }
   }
   
-  if (objectPattern.test(normalized) && !normalized.includes("code") && !normalized.includes("explain")) {
+  // "make a todo list", "create a study plan", "generate 10 names" are text tasks. Bare "draw/make X"
+  // only counts as an image when X is not obviously a document/text/data deliverable.
+  const TEXT_DELIVERABLE = /\b(list|plan|summary|summar|email|mail|essay|report|table|schedule|names?|ideas?|titles?|questions?|quiz|outline|resume|cv|letter|post|caption|paragraph|story|poem|song|script|message|document|doc|presentation|ppt|slides?|spreadsheet|sheet|timetable|notes?|checklist|budget|menu|recipe|code|app|website|bot|prompt)\b/i;
+  const IMAGE_VERB = /^\s*(draw|paint|sketch|illustrate|render)\b/i;
+  const isTextTask = TEXT_DELIVERABLE.test(normalized);
+
+  if (!isTextTask && objectPattern.test(normalized) && !normalized.includes("code") && !normalized.includes("explain")) {
     return true;
   }
-  
-  if (shortPattern.test(normalized) && normalized.length < 60 && !normalized.includes("?") && !codeLike) {
+
+  if (!isTextTask && shortPattern.test(normalized) && normalized.length < 60 && !normalized.includes("?") && !codeLike
+      && (IMAGE_VERB.test(normalized) || hasExplicitImageNoun)) {
+    return true;
+  }
+
+  // "show me a picture/photo of ...", "design a logo ..."
+  if (/\b(show me|give me|get me|i want|i need)\s+(an?\s+)?(picture|photo|image|illustration|wallpaper)\s+of\b/i.test(normalized)
+      || /\b(design|make|create)\s+(me\s+)?(an?\s+)?(logo|wallpaper|poster|icon)\b/i.test(normalized)) {
     return true;
   }
   
@@ -392,8 +439,19 @@ const generateImageInternal = async (prompt, options = {}) => {
         throw new Error(`Non-image response received (content-type: ${response.headers?.["content-type"] || "unknown"})`);
       }
 
-      const base64Image = Buffer.from(response.data, "binary").toString("base64");
-      const mimeType = String(response.headers?.["content-type"] || "image/png").split(";")[0] || "image/png";
+      let imageBuffer = Buffer.from(response.data);
+      let mimeType = String(response.headers?.["content-type"] || "image/png").split(";")[0] || "image/png";
+
+      // Re-encode as WebP: roughly 5-10x smaller than the PNG/JPEG the provider returns, which keeps
+      // MongoDB documents and chat-history responses small. Falls back to the original on any error.
+      try {
+        imageBuffer = await sharp(imageBuffer).webp({ quality: Number(process.env.IMAGE_WEBP_QUALITY || 82) }).toBuffer();
+        mimeType = "image/webp";
+      } catch (compressError) {
+        logError("generateImage:compress", compressError);
+      }
+
+      const base64Image = imageBuffer.toString("base64");
       const dataUrl = `data:${mimeType};base64,${base64Image}`;
 
       const actual = getImageDimensions(Buffer.from(response.data));
@@ -438,7 +496,7 @@ const generateImageInternal = async (prompt, options = {}) => {
   };
 };
 
-const generateImage = (prompt, options = {}) => runQueued(() => generateImageInternal(prompt, options));
+const generateImage = (prompt, options = {}) => runQueued(() => generateImageInternal(prompt, options), options.userKey);
 
 module.exports = {
   chooseImageSize,

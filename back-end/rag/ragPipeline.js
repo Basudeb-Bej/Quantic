@@ -51,6 +51,8 @@ const retrieveTopK = (embedding, topK = 3) => {
       metadata: normalizeMetadata(entry?.metadata || entry),
     }))
     .filter((entry) => entry.text)
+    // Irrelevant chunks are worse than none: drop anything below a similarity floor.
+    .filter((entry) => entry.score >= Number(process.env.RAG_MIN_SCORE || 0.35))
     .sort((left, right) => right.score - left.score)
     .slice(0, Math.max(0, Number(topK) || 0))
     .map((entry) => ({
@@ -525,8 +527,25 @@ const buildPrompt = async (query, options = {}) => {
   }
 };
 
+const hasKnowledge = () => {
+  try {
+    return loadDB().some((entry) => normalizeText(entry?.text || entry?.content || ""));
+  } catch {
+    return false;
+  }
+};
+
+const searchKnowledge = async (query) => {
+  const embedding = await createEmbedding(query);
+  const docs = embedding ? retrieveTopK(embedding, 4) : [];
+  return docs.length ? docs.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n\n") : "No relevant knowledge-base entries found.";
+};
+
 module.exports = {
   buildPrompt,
+  buildStyleInstruction,
+  hasKnowledge,
+  searchKnowledge,
   formatConversationContext,
   formatPrompt,
   formatRetrievedDocs,

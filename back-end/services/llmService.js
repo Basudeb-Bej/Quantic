@@ -42,8 +42,8 @@ const REQUEST_TIMEOUT_MS = envNumber("GROQ_REQUEST_TIMEOUT_MS", 30000);
 const STREAM_IDLE_TIMEOUT_MS = envNumber("GROQ_STREAM_IDLE_TIMEOUT_MS", 20000);
 const STREAM_MAX_MS = envNumber("GROQ_STREAM_MAX_MS", 180000);
 
-const MAX_PROMPT_TOKENS = envNumber("GROQ_MAX_PROMPT_TOKENS", 6000);
-const MAX_TURN_TOKENS = envNumber("GROQ_MAX_TURN_TOKENS", 14000);
+const MAX_PROMPT_TOKENS = envNumber("GROQ_MAX_PROMPT_TOKENS", 12000);
+const MAX_TURN_TOKENS = envNumber("GROQ_MAX_TURN_TOKENS", 24000);
 
 const MAX_CONTINUE_ROUNDS = envNumber("GROQ_MAX_CONTINUE_ROUNDS", 3);
 const CONTINUATION_TAIL_CHARS = envNumber("GROQ_CONTINUATION_TAIL_CHARS", 1800);
@@ -67,13 +67,13 @@ const REFLECTION_MODEL = process.env.GROQ_REFLECTION_MODEL || FAST_MODEL;
 const REFLECTION_MAX_TOKENS = envNumber("GROQ_REFLECTION_MAX_TOKENS", 900);
 const SMALLTALK_MAX_TOKENS = envNumber("GROQ_SMALLTALK_MAX_TOKENS", 160);
 const TERSE_MAX_TOKENS = envNumber("GROQ_TERSE_MAX_TOKENS", 320);
-const MAIN_MAX_TOKENS = envNumber("GROQ_MAIN_MAX_TOKENS", 1200);
-const COMPLEX_MAIN_MAX_TOKENS = envNumber("GROQ_COMPLEX_MAIN_MAX_TOKENS", 2000);
-const CREATIVE_MAIN_MAX_TOKENS = envNumber("GROQ_CREATIVE_MAIN_MAX_TOKENS", 3000);
-const ATTACHMENT_MAIN_MAX_TOKENS = envNumber("GROQ_ATTACHMENT_MAIN_MAX_TOKENS", 2000);
-const CODE_MAIN_MAX_TOKENS = envNumber("GROQ_CODE_MAIN_MAX_TOKENS", 4000);
+const MAIN_MAX_TOKENS = envNumber("GROQ_MAIN_MAX_TOKENS", 3000);
+const COMPLEX_MAIN_MAX_TOKENS = envNumber("GROQ_COMPLEX_MAIN_MAX_TOKENS", 6000);
+const CREATIVE_MAIN_MAX_TOKENS = envNumber("GROQ_CREATIVE_MAIN_MAX_TOKENS", 4000);
+const ATTACHMENT_MAIN_MAX_TOKENS = envNumber("GROQ_ATTACHMENT_MAIN_MAX_TOKENS", 4000);
+const CODE_MAIN_MAX_TOKENS = envNumber("GROQ_CODE_MAIN_MAX_TOKENS", 6000);
 
-const REFLECTION_ENABLED = envFlag("GROQ_REFLECTION_ENABLED", true);
+const REFLECTION_ENABLED = envFlag("GROQ_REFLECTION_ENABLED", false);
 
 const MODEL_LIMITS = {
   "llama-3.1-8b-instant": { context: 131072, maxCompletion: 8192 },
@@ -1101,6 +1101,14 @@ const resolveVisionModelChain = async (requestedModel) => {
   ].filter((model, index, list) => model && list.indexOf(model) === index);
   const available = await fetchAvailableModels();
 
+  // Discover vision-capable models the account actually has instead of relying on one hard-coded name.
+  if (available) {
+    const VISION_NAME = /(llama-4|scout|maverick|vision|[-_/]vl\b|pixtral|llava)/i;
+    for (const id of available) {
+      if (VISION_NAME.test(id) && !preferences.includes(id)) preferences.push(id);
+    }
+  }
+
   const usable = preferences.filter((model) => {
     if (!isModelUsable(model)) return false;
     if (available && !available.has(model)) {
@@ -1162,7 +1170,7 @@ const BASE_SYSTEM_RULES = [
 ].join(" ");
 
 const FORMAT_SYSTEM_RULES = [
-  "Match the length of your answer to the question: a factual or yes/no question gets one to three sentences, and only a genuinely multi-part or complex question earns headings and sections.",
+  "Match the length of your answer to the question: a simple factual or yes/no question gets a short direct answer, but a question that asks why, how, or for an explanation deserves a complete, well-reasoned answer with the reasoning and a concrete example. Only a genuinely multi-part or complex question earns headings and sections.",
   "A request to explain the difference between, compare, or distinguish topics is NOT a short factual question: answer it with a comparison table followed by a numbered explanation of every row (2 to 3 sentences each, with a concrete example), never with a few one-line bullets.",
   "Use Markdown structure — ## headings, **bold**, tables, and numbered or bulleted lists — only when it makes a longer answer easier to read, never as decoration on a short one.",
   "Number every ordered list in sequence (1., 2., 3. and so on) and never repeat the same number for several items, even when a code block or paragraph sits between two items.",
@@ -1260,7 +1268,7 @@ const applyReasoningControls = (data, model, profile = null) => {
     const configured = normalizeText(process.env.GROQ_REASONING_EFFORT).toLowerCase();
     const effort = ["low", "medium", "high"].includes(configured)
       ? configured
-      : (profile?.isComplex || profile?.kind === "code" || profile?.kind === "math" ? "medium" : "low");
+      : (profile?.isComplex || ["code", "math", "analysis", "attachment", "realtime"].includes(profile?.kind) ? "high" : "medium");
 
     data.reasoning_effort = effort;
     return data;
